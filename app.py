@@ -4,7 +4,6 @@ from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
-import re # Biblioteca para expressões regulares (achar padrões de texto)
 
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Processador de Comissões", layout="wide")
@@ -14,17 +13,22 @@ st.write("Identifica cada técnico e suas respectivas horas vendidas automaticam
 
 # --- 2. CONEXÃO SEGURA ---
 def conectar_sheets():
+    # Define as permissões necessárias
     scope = ['https://www.googleapis.com/auth/spreadsheets', 
              'https://www.googleapis.com/auth/drive']
+    
+    # Pega as credenciais guardadas nos "Segredos" do Streamlit Cloud
     credentials_dict = st.secrets["gcp_service_account"]
+    
     creds = Credentials.from_service_account_info(credentials_dict, scopes=scope)
     client = gspread.authorize(creds)
     return client
 
-# --- 3. UPLOAD ---
+# --- 3. UPLOAD DO ARQUIVO ---
 arquivo = st.file_uploader("Solte o relatório HTML aqui", type=["html", "htm"])
 
 if arquivo:
+    # Lê o arquivo ignorando erros de codificação
     conteudo = arquivo.read().decode("utf-8", errors='ignore')
     soup = BeautifulSoup(conteudo, "html.parser")
     
@@ -45,8 +49,6 @@ if arquivo:
         # 1. Tenta achar a linha que define o funcionário
         if "TOTAL DO FUNCIONARIO" in texto_linha:
             # Exemplo de texto: "TOTAL DO FUNCIONARIO AAD:"
-            # Vamos separar por espaço e pegar a sigla
-            # Removemos os dois pontos se tiver
             try:
                 parte_nome = texto_linha.split("TOTAL DO FUNCIONARIO")[1]
                 tecnico_atual = parte_nome.replace(":", "").strip()
@@ -58,13 +60,11 @@ if arquivo:
             # Achar as células (td) dessa linha específica
             celulas = linha.find_all("td")
             
-            # Baseado na estrutura que você mandou, o valor está numa célula à direita
-            # Vamos varrer as células procurando a que tem números e "HORAS"
+            # Varre as células procurando a que tem números e "HORAS"
             for celula in celulas:
                 texto_celula = celula.get_text(strip=True).upper()
                 
-                # Verifica se parece um valor de hora (tem número e 'HORAS')
-                # Ignora a célula que diz só "HORAS VENDIDAS:"
+                # Verifica se parece um valor de hora e ignora o rótulo
                 if "HORAS" in texto_celula and any(c.isdigit() for c in texto_celula) and "VENDIDAS" not in texto_celula:
                     valor_limpo = texto_celula.replace("HORAS", "").strip()
                     
@@ -72,9 +72,7 @@ if arquivo:
                     timestamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                     dados_para_enviar.append([timestamp, arquivo.name, tecnico_atual, valor_limpo])
                     
-                    # Importante: Não limpamos o tecnico_atual aqui, 
-                    # pois podem haver outras informações dele abaixo.
-                    # Ele só muda quando o loop achar outro "TOTAL DO FUNCIONARIO"
+                    # Interrompe o loop das células, mas continua o das linhas
                     break 
 
     # --- 4. EXIBIÇÃO E CONFIRMAÇÃO ---
@@ -87,9 +85,10 @@ if arquivo:
             with st.spinner("Enviando dados em lote..."):
                 try:
                     client = conectar_sheets()
+                    # Abra a planilha pelo nome exato. Ajuste se necessário.
                     sheet = client.open("Dados_HTML").sheet1 
                     
-                    # append_rows (no plural) é mais rápido para muitos dados
+                    # Envia tudo de uma vez
                     sheet.append_rows(dados_para_enviar)
                     
                     st.balloons()
