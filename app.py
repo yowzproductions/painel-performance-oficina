@@ -1,99 +1,34 @@
-import streamlit as st
-import pandas as pd
-from bs4 import BeautifulSoup
-import gspread
-from google.oauth2.service_account import Credentials
-from datetime import datetime
-
-# --- 1. CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Processador de Comissões", layout="wide")
-
-st.title("📊 Processador de Comissões em Lote")
-st.write("Identifica cada técnico e suas respectivas horas vendidas automaticamente.")
-
-# --- 2. CONEXÃO SEGURA ---
-def conectar_sheets():
-    # Define as permissões necessárias
-    scope = ['https://www.googleapis.com/auth/spreadsheets', 
-             'https://www.googleapis.com/auth/drive']
-    
-    # Pega as credenciais guardadas nos "Segredos" do Streamlit Cloud
-    credentials_dict = st.secrets["gcp_service_account"]
-    
-    creds = Credentials.from_service_account_info(credentials_dict, scopes=scope)
-    client = gspread.authorize(creds)
-    return client
-
-# --- 3. UPLOAD DO ARQUIVO ---
-arquivo = st.file_uploader("Solte o relatório HTML aqui", type=["html", "htm"])
-
-if arquivo:
-    # Lê o arquivo ignorando erros de codificação
-    conteudo = arquivo.read().decode("utf-8", errors='ignore')
-    soup = BeautifulSoup(conteudo, "html.parser")
-    
-    # Lista para guardar todos os dados encontrados antes de enviar
-    dados_para_enviar = []
-    
-    # Variável para memorizar qual técnico estamos lendo no momento
-    tecnico_atual = None
-    
-    # Estratégia: Pegar todas as linhas da tabela (tr) e ler uma por uma
-    linhas = soup.find_all("tr")
-    
-    st.write(f"🔍 Analisando {len(linhas)} linhas do arquivo...")
-    
-    for linha in linhas:
-        texto_linha = linha.get_text(separator=" ", strip=True).upper()
-        
-        # 1. Tenta achar a linha que define o funcionário
-        if "TOTAL DO FUNCIONARIO" in texto_linha:
-            # Exemplo de texto: "TOTAL DO FUNCIONARIO AAD:"
-            try:
-                parte_nome = texto_linha.split("TOTAL DO FUNCIONARIO")[1]
-                tecnico_atual = parte_nome.replace(":", "").strip()
-            except:
-                continue # Se der erro, pula pra próxima linha
-                
-        # 2. Se já temos um técnico na memória, procuramos as horas
-        if tecnico_atual and "HORAS VENDIDAS:" in texto_linha:
-            # Achar as células (td) dessa linha específica
-            celulas = linha.find_all("td")
-            
-            # Varre as células procurando a que tem números e "HORAS"
-            for celula in celulas:
-                texto_celula = celula.get_text(strip=True).upper()
-                
-                # Verifica se parece um valor de hora e ignora o rótulo
-                if "HORAS" in texto_celula and any(c.isdigit() for c in texto_celula) and "VENDIDAS" not in texto_celula:
-                    valor_limpo = texto_celula.replace("HORAS", "").strip()
-                    
-                    # Adiciona na nossa lista final
-                    timestamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-                    dados_para_enviar.append([timestamp, arquivo.name, tecnico_atual, valor_limpo])
-                    
-                    # Interrompe o loop das células, mas continua o das linhas
-                    break 
+# ... (o resto do código acima continua igual)
 
     # --- 4. EXIBIÇÃO E CONFIRMAÇÃO ---
     if len(dados_para_enviar) > 0:
         df = pd.DataFrame(dados_para_enviar, columns=["Data", "Arquivo", "Técnico", "Horas"])
         st.success(f"Encontrei {len(dados_para_enviar)} registros!")
-        st.dataframe(df) # Mostra uma tabela prévia na tela
+        st.dataframe(df)
         
         if st.button("Confirmar e Gravar TUDO no Sheets"):
-            with st.spinner("Enviando dados em lote..."):
+            with st.spinner("Enviando dados para a aba 'Comissoes'..."):
                 try:
                     client = conectar_sheets()
-                    # Abra a planilha pelo nome exato. Ajuste se necessário.
-                    sheet = client.open("Dados_HTML").sheet1 
                     
-                    # Envia tudo de uma vez
-                    sheet.append_rows(dados_para_enviar)
+                    # 1. Abre o ARQUIVO (Planilha) pelo nome
+                    arquivo_sheet = client.open("Dados_HTML")
+                    
+                    # 2. Seleciona a ABA específica pelo nome "Comissoes"
+                    # Se der erro aqui, é porque a aba não tem exatamente esse nome
+                    aba = arquivo_sheet.worksheet("Comissoes") 
+                    
+                    # 3. Envia os dados
+                    aba.append_rows(dados_para_enviar)
                     
                     st.balloons()
-                    st.success("✅ Todos os técnicos foram salvos na planilha!")
+                    st.success("✅ Sucesso! Dados gravados na aba 'Comissoes'.")
+                    
                 except Exception as e:
-                    st.error(f"Erro ao salvar: {e}")
-    else:
-        st.warning("Não consegui identificar nenhum padrão 'TOTAL DO FUNCIONARIO' seguido de 'HORAS VENDIDAS'. Verifique o arquivo.")
+                    # Tratamento para o falso erro 200
+                    if "200" in str(e):
+                         st.balloons()
+                         st.success("✅ Sucesso! (O Google confirmou o recebimento).")
+                    else:
+                        st.error(f"Erro ao salvar: {e}")
+                        st.warning("Verifique se a aba da planilha se chama exatamente 'Comissoes' e se o robô tem acesso de Editor.")
