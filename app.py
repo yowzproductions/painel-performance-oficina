@@ -27,7 +27,7 @@ def conectar_sheets():
 
 def processar_unificacao():
     """
-    Lê as abas com os nomes exatos fornecidos pelo Ronaldo e cruza os dados.
+    Lê as abas com os nomes exatos fornecidos e cruza os dados.
     """
     client = conectar_sheets()
     sh = client.open_by_key(ID_PLANILHA_MESTRA)
@@ -53,23 +53,19 @@ def processar_unificacao():
     df_com.columns = [c.strip() for c in df_com.columns]
     df_aprov.columns = [c.strip() for c in df_aprov.columns]
 
-    # --- AJUSTE DE NOMES (O SEGREDO DO SUCESSO) ---
+    # --- AJUSTE DE NOMES ---
     # Mapear as colunas da aba Comissões para um padrão comum
-    # "Data Processamento" vira "Data"
-    # "Sigla Técnico" vira "Técnico"
-    
     renomear_comissao = {
         "Data Processamento": "Data",
         "Sigla Técnico": "Técnico"
     }
     df_com.rename(columns=renomear_comissao, inplace=True)
 
-    # Verifica se a troca funcionou (ou seja, se os nomes estavam certos na planilha)
+    # Verifica se a troca funcionou
     if "Data" not in df_com.columns or "Técnico" not in df_com.columns:
         return False, f"Erro: Não achei as colunas 'Data Processamento' ou 'Sigla Técnico' na aba Comissões. Colunas lidas: {df_com.columns.tolist()}"
 
     # Na aba Aproveitamento, os nomes já devem ser "Data" e "Técnico".
-    # Se não forem, o merge vai falhar, então vamos garantir.
     if "Data" not in df_aprov.columns or "Técnico" not in df_aprov.columns:
         return False, f"Erro: Não achei as colunas 'Data' ou 'Técnico' na aba Aproveitamento. Colunas lidas: {df_aprov.columns.tolist()}"
 
@@ -85,7 +81,7 @@ def processar_unificacao():
         df_com, 
         df_aprov, 
         on=['Data', 'Técnico'], 
-        how='outer', # Mantém tudo
+        how='outer', 
         suffixes=('_Comissao', '_Aprov')
     )
     
@@ -144,3 +140,93 @@ with aba_comissoes:
 
         if len(dados_comissao) > 0:
             # AJUSTE DE COLUNAS AQUI TAMBÉM
+            colunas_comissao = ["Data Processamento", "Nome do Arquivo", "Sigla Técnico", "Horas Vendidas"]
+            df_comissao = pd.DataFrame(dados_comissao, columns=colunas_comissao)
+            st.dataframe(df_comissao)
+            
+            if st.button("Gravar Comissões", key="btn_comissao"):
+                with st.spinner("Enviando..."):
+                    client = conectar_sheets(); aba = client.open_by_key(ID_PLANILHA_MESTRA).worksheet("Comissoes")
+                    if not aba.get_all_values():
+                        aba.append_row(colunas_comissao)
+                    aba.append_rows(dados_comissao)
+                    st.success("✅ Sucesso!")
+
+# --- TAB 2: APROVEITAMENTO ---
+with aba_aproveitamento:
+    st.header("Extrator de Aproveitamento")
+    arquivos_aprov = st.file_uploader("Upload Aproveitamento HTML", type=["html", "htm"], accept_multiple_files=True, key="uploader_aprov")
+    
+    if arquivos_aprov:
+        dados_aprov = []
+        for arquivo in arquivos_aprov:
+            try:
+                raw_data = arquivo.read()
+                try: conteudo = raw_data.decode("utf-8")
+                except:
+                    try: conteudo = raw_data.decode("latin-1")
+                    except: conteudo = raw_data.decode("utf-16")
+                
+                soup = BeautifulSoup(conteudo, "html.parser")
+                tecnico_atual_aprov = None
+                linhas = soup.find_all("tr")
+                
+                for linha in linhas:
+                    texto_original = linha.get_text(separator=" ", strip=True).upper()
+                    texto_limpo = remover_acentos(texto_original)
+                    if "TOTAL FILIAL:" in texto_original: break
+                    if "MECANICO" in texto_limpo and "TOT.MEC" not in texto_limpo:
+                        try:
+                            parte_direita = texto_limpo.split("MECANICO")[1]
+                            parte_direita = parte_direita.replace(":", "").strip()
+                            if "-" in parte_direita: tecnico_atual_aprov = parte_direita.split("-")[0].strip()
+                            else: tecnico_atual_aprov = parte_direita.split()[0]
+                        except: continue
+                    if "TOT.MEC.:" in texto_original:
+                        tecnico_atual_aprov = None; continue
+                    if tecnico_atual_aprov:
+                        celulas = linha.find_all("td")
+                        if not celulas: continue
+                        txt_cel0 = celulas[0].get_text(strip=True)
+                        if re.match(r"\d{2}/\d{2}/\d{2}", txt_cel0):
+                            try:
+                                if len(celulas) >= 4:
+                                    dados_aprov.append([txt_cel0.split()[0], arquivo.name, tecnico_atual_aprov, 
+                                                      celulas[1].get_text(strip=True), 
+                                                      celulas[2].get_text(strip=True), 
+                                                      celulas[3].get_text(strip=True)])
+                            except: continue
+            except Exception as e: st.error(f"Erro leitura: {e}")
+
+        if len(dados_aprov) > 0:
+            # AJUSTE DE COLUNAS AQUI TAMBÉM
+            colunas_aprov = ["Data", "Arquivo", "Técnico", "Disp", "TP", "TG"]
+            df_aprov = pd.DataFrame(dados_aprov, columns=colunas_aprov)
+            
+            st.success(f"✅ Sucesso! {len(dados_aprov)} registros.")
+            st.dataframe(df_aprov)
+            
+            if st.button("Gravar Aproveitamento", key="btn_aprov"):
+                with st.spinner("Enviando..."):
+                    client = conectar_sheets(); aba = client.open_by_key(ID_PLANILHA_MESTRA).worksheet("Aproveitamento")
+                    if not aba.get_all_values():
+                        aba.append_row(colunas_aprov)
+                    aba.append_rows(dados_aprov)
+                    st.success("✅ Gravado!")
+
+# --- TAB 3: RELATÓRIO UNIFICADO ---
+with aba_unificacao:
+    st.header("🔗 Unificação de Dados (Comissões + Aproveitamento)")
+    st.info("Este módulo lê 'Data Processamento' e 'Sigla Técnico' da aba Comissões e cruza com 'Data' e 'Técnico' da aba Aproveitamento.")
+    
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("🚀 Gerar Relatório Unificado"):
+            with st.spinner("Lendo planilhas e cruzando dados..."):
+                sucesso, mensagem = processar_unificacao()
+                if sucesso:
+                    st.success(mensagem)
+                    st.balloons()
+                else:
+                    st.error(mensagem)
+                
