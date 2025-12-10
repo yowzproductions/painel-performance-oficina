@@ -11,6 +11,7 @@ import unicodedata
 st.set_page_config(page_title="Central de Relatórios WLM", layout="wide")
 st.title("🏭 Central de Processamento de Relatórios")
 
+# ID da sua planilha
 ID_PLANILHA_MESTRA = "1XibBlm2x46Dk5bf4JvfrMepD4gITdaOtTALSgaFcwV0"
 
 # --- FUNÇÕES AUXILIARES ---
@@ -25,7 +26,9 @@ def conectar_sheets():
     return client
 
 def processar_unificacao():
-    """Lê Comissões e Aproveitamento, une os dados e salva na aba Consolidado."""
+    """
+    Lê as abas com os nomes exatos fornecidos pelo Ronaldo e cruza os dados.
+    """
     client = conectar_sheets()
     sh = client.open_by_key(ID_PLANILHA_MESTRA)
 
@@ -34,54 +37,72 @@ def processar_unificacao():
         ws_com = sh.worksheet("Comissoes")
         ws_aprov = sh.worksheet("Aproveitamento")
     except:
-        return False, "Erro: Certifique-se que as abas 'Comissoes' e 'Aproveitamento' existem e têm dados."
+        return False, "Erro: As abas 'Comissoes' ou 'Aproveitamento' não foram encontradas."
 
-    # 2. Converter para DataFrame
-    df_com = pd.DataFrame(ws_com.get_all_records())
-    df_aprov = pd.DataFrame(ws_aprov.get_all_records())
+    # 2. Ler os dados
+    dados_com = ws_com.get_all_records()
+    dados_aprov = ws_aprov.get_all_records()
 
-    if df_com.empty or df_aprov.empty:
-        return False, "Uma das abas (Comissoes ou Aproveitamento) está vazia."
+    if not dados_com or not dados_aprov:
+        return False, "Uma das abas está vazia. Faça upload dos arquivos primeiro."
 
-    # 3. Padronização para o Cruzamento (ETL)
-    # Renomeia 'Data Ref.' para 'Data' para bater com a outra tabela
-    if 'Data Ref.' in df_com.columns:
-        df_com.rename(columns={'Data Ref.': 'Data'}, inplace=True)
+    df_com = pd.DataFrame(dados_com)
+    df_aprov = pd.DataFrame(dados_aprov)
+
+    # 3. Limpeza de Nomes de Colunas (Remove espaços acidentais)
+    df_com.columns = [c.strip() for c in df_com.columns]
+    df_aprov.columns = [c.strip() for c in df_aprov.columns]
+
+    # --- AJUSTE DE NOMES (O SEGREDO DO SUCESSO) ---
+    # Mapear as colunas da aba Comissões para um padrão comum
+    # "Data Processamento" vira "Data"
+    # "Sigla Técnico" vira "Técnico"
     
-    # Converte chaves para texto (String) para evitar erro de tipo
+    renomear_comissao = {
+        "Data Processamento": "Data",
+        "Sigla Técnico": "Técnico"
+    }
+    df_com.rename(columns=renomear_comissao, inplace=True)
+
+    # Verifica se a troca funcionou (ou seja, se os nomes estavam certos na planilha)
+    if "Data" not in df_com.columns or "Técnico" not in df_com.columns:
+        return False, f"Erro: Não achei as colunas 'Data Processamento' ou 'Sigla Técnico' na aba Comissões. Colunas lidas: {df_com.columns.tolist()}"
+
+    # Na aba Aproveitamento, os nomes já devem ser "Data" e "Técnico".
+    # Se não forem, o merge vai falhar, então vamos garantir.
+    if "Data" not in df_aprov.columns or "Técnico" not in df_aprov.columns:
+        return False, f"Erro: Não achei as colunas 'Data' ou 'Técnico' na aba Aproveitamento. Colunas lidas: {df_aprov.columns.tolist()}"
+
+    # 4. Padronização de Tipos (Texto)
     df_com['Data'] = df_com['Data'].astype(str)
     df_com['Técnico'] = df_com['Técnico'].astype(str)
     df_aprov['Data'] = df_aprov['Data'].astype(str)
     df_aprov['Técnico'] = df_aprov['Técnico'].astype(str)
 
-    # 4. O Merge (Cruzamento)
-    # Usa 'Data' e 'Técnico' como âncoras. 'outer' garante que ninguém suma.
+    # 5. O Merge (Cruzamento)
+    # Une as duas tabelas usando Data e Técnico como chave
     df_final = pd.merge(
         df_com, 
         df_aprov, 
         on=['Data', 'Técnico'], 
-        how='outer', 
+        how='outer', # Mantém tudo
         suffixes=('_Comissao', '_Aprov')
     )
     
-    # Preenche vazios com string vazia
     df_final.fillna("", inplace=True)
 
-    # 5. Salvar na aba 'Consolidado'
+    # 6. Salvar na aba 'Consolidado'
     try:
         ws_final = sh.worksheet("Consolidado")
         ws_final.clear()
     except:
-        # Se não existir, cria a aba
         ws_final = sh.add_worksheet(title="Consolidado", rows=1000, cols=20)
     
-    # Update final
     ws_final.update([df_final.columns.values.tolist()] + df_final.values.tolist())
     
     return True, f"Sucesso! {len(df_final)} linhas consolidadas."
 
 # --- INTERFACE (TABS) ---
-# Agora temos 3 abas
 aba_comissoes, aba_aproveitamento, aba_unificacao = st.tabs([
     "💰 Pagamento de Comissões", 
     "⚙️ Aproveitamento Técnico",
@@ -122,98 +143,4 @@ with aba_comissoes:
             except Exception as e: st.error(f"Erro: {e}")
 
         if len(dados_comissao) > 0:
-            df_comissao = pd.DataFrame(dados_comissao, columns=["Data Ref.", "Arquivo", "Técnico", "Horas"])
-            st.dataframe(df_comissao)
-            if st.button("Gravar Comissões", key="btn_comissao"):
-                with st.spinner("Enviando..."):
-                    client = conectar_sheets(); aba = client.open_by_key(ID_PLANILHA_MESTRA).worksheet("Comissoes")
-                    aba.append_rows(dados_comissao); st.success("✅ Sucesso!")
-
-# --- TAB 2: APROVEITAMENTO ---
-with aba_aproveitamento:
-    st.header("Extrator de Aproveitamento")
-    arquivos_aprov = st.file_uploader("Upload Aproveitamento HTML", type=["html", "htm"], accept_multiple_files=True, key="uploader_aprov")
-    
-    if arquivos_aprov:
-        dados_aprov = []
-        amostra_linhas = [] # Debug
-        
-        for arquivo in arquivos_aprov:
-            try:
-                raw_data = arquivo.read()
-                try: conteudo = raw_data.decode("utf-8")
-                except:
-                    try: conteudo = raw_data.decode("latin-1")
-                    except: conteudo = raw_data.decode("utf-16")
-                
-                soup = BeautifulSoup(conteudo, "html.parser")
-                tecnico_atual_aprov = None
-                linhas = soup.find_all("tr")
-                
-                for i, l in enumerate(linhas[:10]):
-                    amostra_linhas.append(l.get_text(separator=" ", strip=True))
-
-                for linha in linhas:
-                    texto_original = linha.get_text(separator=" ", strip=True).upper()
-                    texto_limpo = remover_acentos(texto_original)
-                    
-                    if "TOTAL FILIAL:" in texto_original: break
-
-                    if "MECANICO" in texto_limpo and "TOT.MEC" not in texto_limpo:
-                        try:
-                            parte_direita = texto_limpo.split("MECANICO")[1]
-                            parte_direita = parte_direita.replace(":", "").strip()
-                            if "-" in parte_direita: tecnico_atual_aprov = parte_direita.split("-")[0].strip()
-                            else: tecnico_atual_aprov = parte_direita.split()[0]
-                        except: continue
-
-                    if "TOT.MEC.:" in texto_original:
-                        tecnico_atual_aprov = None; continue
-
-                    if tecnico_atual_aprov:
-                        celulas = linha.find_all("td")
-                        if not celulas: continue
-                        txt_cel0 = celulas[0].get_text(strip=True)
-                        if re.match(r"\d{2}/\d{2}/\d{2}", txt_cel0):
-                            try:
-                                if len(celulas) >= 4:
-                                    dados_aprov.append([txt_cel0.split()[0], arquivo.name, tecnico_atual_aprov, 
-                                                      celulas[1].get_text(strip=True), 
-                                                      celulas[2].get_text(strip=True), 
-                                                      celulas[3].get_text(strip=True)])
-                            except: continue
-            except Exception as e: st.error(f"Erro leitura: {e}")
-
-        if len(dados_aprov) > 0:
-            df_aprov = pd.DataFrame(dados_aprov, columns=["Data", "Arquivo", "Técnico", "T. Disp", "TP", "TG"])
-            st.success(f"✅ Sucesso! {len(dados_aprov)} registros.")
-            st.dataframe(df_aprov)
-            if st.button("Gravar Aproveitamento", key="btn_aprov"):
-                with st.spinner("Enviando..."):
-                    client = conectar_sheets(); aba = client.open_by_key(ID_PLANILHA_MESTRA).worksheet("Aproveitamento")
-                    aba.append_rows(dados_aprov); st.success("✅ Gravado!")
-        else:
-            st.warning("⚠️ Nenhum dado encontrado. Veja abaixo o que o robô enxergou:")
-            with st.expander("🕵️‍♂️ RAIO-X (O que o robô leu no arquivo?)"):
-                if amostra_linhas:
-                    for l in amostra_linhas:
-                        st.text(l)
-                else:
-                    st.error("O robô não encontrou nenhuma linha de tabela (<tr>). O arquivo pode não ser um HTML padrão.")
-
-# --- TAB 3: RELATÓRIO UNIFICADO (NOVO) ---
-with aba_unificacao:
-    st.header("🔗 Unificação de Dados (Comissões + Aproveitamento)")
-    st.info("Este módulo lê os dados que já estão no Google Sheets, cruza as informações por 'Data' e 'Técnico' e gera uma tabela consolidada.")
-    
-    col1, col2 = st.columns([1, 4])
-    
-    with col1:
-        if st.button("🚀 Gerar Relatório Unificado"):
-            with st.spinner("Lendo planilhas e cruzando dados..."):
-                sucesso, mensagem = processar_unificacao()
-                if sucesso:
-                    st.success(mensagem)
-                    st.balloons()
-                else:
-                    st.error(mensagem)
+            # AJUSTE DE COLUNAS AQUI TAMBÉM
