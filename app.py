@@ -9,11 +9,9 @@ import unicodedata
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Central de Relatórios WLM", layout="wide", page_icon="🔒")
-
-# ID da sua planilha
 ID_PLANILHA_MESTRA = "1XibBlm2x46Dk5bf4JvfrMepD4gITdaOtTALSgaFcwV0"
 
-# --- FUNÇÕES TÉCNICAS E AUXILIARES ---
+# --- AUXILIARES ---
 def remover_acentos(texto):
     return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
 
@@ -25,6 +23,7 @@ def conectar_sheets():
     return client
 
 def converter_br_para_float(valor):
+    """Lê do HTML (8,30) e vira Float Python (8.3) para cálculo."""
     if pd.isna(valor) or valor == "": return 0.0
     if isinstance(valor, (int, float)): return float(valor)
     valor_str = str(valor).strip()
@@ -32,6 +31,17 @@ def converter_br_para_float(valor):
     valor_str = valor_str.replace(',', '.')
     try: return float(valor_str)
     except: return 0.0
+
+def float_para_string_br(valor):
+    """
+    Transforma Float Python (8.3) em String Excel BR ('8,3').
+    Isso força o Google Sheets a reconhecer a vírgula corretamente.
+    """
+    if pd.isna(valor) or valor == "": return ""
+    # Arredonda para 2 casas para ficar bonito
+    valor_float = float(valor)
+    # Formata trocando ponto por virgula
+    return f"{valor_float:.2f}".replace('.', ',')
 
 def verificar_acesso():
     try:
@@ -41,18 +51,16 @@ def verificar_acesso():
         except: return 'admin'
     except: return None
 
-# --- LÓGICA DE PARSEAMENTO HTML (EXTRAÇÃO) ---
-# Separamos isso para poder chamar de qualquer lugar
+# --- PARSERS (LEITURA) ---
 def parse_comissoes(arquivos):
     dados = []
     for arquivo in arquivos:
         try:
+            arquivo.seek(0)
             try: conteudo = arquivo.read().decode("utf-8")
             except: 
                 arquivo.seek(0)
                 conteudo = arquivo.read().decode("latin-1")
-            # Reseta o ponteiro do arquivo para caso precise ler de novo
-            arquivo.seek(0)
             
             soup = BeautifulSoup(conteudo, "html.parser")
             texto_completo = soup.get_text(separator=" ", strip=True)
@@ -79,12 +87,10 @@ def parse_aproveitamento(arquivos):
     dados = []
     for arquivo in arquivos:
         try:
-            raw_data = arquivo.read()
-            # Reseta ponteiro
             arquivo.seek(0)
-            try: conteudo = raw_data.decode("utf-8")
+            try: conteudo = arquivo.read().decode("utf-8")
             except:
-                try: conteudo = raw_data.decode("latin-1")
+                try: conteudo = arquivo.read().decode("latin-1")
                 except: conteudo = raw_data.decode("utf-16")
             
             soup = BeautifulSoup(conteudo, "html.parser")
@@ -114,37 +120,65 @@ def parse_aproveitamento(arquivos):
         except Exception as e: st.error(f"Erro no arquivo {arquivo.name}: {e}")
     return dados
 
-# --- FUNÇÕES DE BANCO DE DADOS (GSPREAD) ---
+# --- GRAVAÇÃO INTELIGENTE (PRESERVA FORMATAÇÃO) ---
+def atualizar_planilha_preservando_formato(sh, nome_aba, df_final):
+    """
+    1. Verifica se aba existe.
+    2. Limpa APENAS dados (mantém formatação de cabeçalho).
+    3. Escreve dados novos.
+    """
+    try:
+        ws = sh.worksheet(nome_aba)
+    except:
+        ws = sh.add_worksheet(title=nome_aba, rows=2000, cols=20)
 
+    # 1. Garante Cabeçalho se estiver vazia
+    if not ws.get_all_values():
+        ws.update('A1', [df_final.columns.values.tolist()])
+        # Se acabou de criar, aplicamos negrito básico (opcional)
+        try: ws.format('A1:Z1', {'textFormat': {'bold': True}})
+        except: pass
+
+    # 2. Limpa DADOS (Linha 2 para baixo) - Preserva Formatação da Linha 1
+    ws.batch_clear(["A2:Z10000"])
+
+    # 3. Prepara Dados
+    dados_para_enviar = df_final.values.tolist()
+    
+    # 4. Envia (Se tiver dados)
+    if dados_para_enviar:
+        ws.update('A2', dados_para_enviar) # Começa na linha 2
+        
+    return True
+
+# --- UPSERT ---
 def salvar_com_upsert(nome_aba, novos_dados_df, colunas_chaves):
-    """Lê, Mescla, Remove Duplicatas e Salva."""
     client = conectar_sheets()
     sh = client.open_by_key(ID_PLANILHA_MESTRA)
     
+    # Lê dados atuais para comparar
     try:
         ws = sh.worksheet(nome_aba)
         dados_antigos = ws.get_all_records()
         df_antigo = pd.DataFrame(dados_antigos)
     except:
-        ws = sh.add_worksheet(title=nome_aba, rows=1000, cols=20)
         df_antigo = pd.DataFrame()
 
-    # Converter tudo para string para comparação segura
+    # Strings para comparação
     if not df_antigo.empty:
         for col in df_antigo.columns: df_antigo[col] = df_antigo[col].astype(str)
     for col in novos_dados_df.columns: novos_dados_df[col] = novos_dados_df[col].astype(str)
 
-    # Upsert
+    # Merge e Deduplicação
     df_total = pd.concat([df_antigo, novos_dados_df])
     df_final = df_total.drop_duplicates(subset=colunas_chaves, keep='last')
 
-    # Limpeza e Gravação
-    ws.clear()
-    ws.update('A1', [df_final.columns.values.tolist()] + df_final.values.tolist())
+    # Usa a nova função de gravação
+    atualizar_planilha_preservando_formato(sh, nome_aba, df_final)
     return len(df_final)
 
+# --- UNIFICAÇÃO (CORRIGIDA COM VÍRGULA) ---
 def processar_unificacao():
-    """Lê as abas salvas, limpa tipos e grava no Consolidado."""
     try:
         client = conectar_sheets()
         sh = client.open_by_key(ID_PLANILHA_MESTRA)
@@ -159,7 +193,7 @@ def processar_unificacao():
         df_com = pd.DataFrame(dados_com)
         df_aprov = pd.DataFrame(dados_aprov)
 
-        # Padronização de Colunas
+        # Limpeza
         df_com.columns = [c.strip() for c in df_com.columns]
         df_aprov.columns = [c.strip() for c in df_aprov.columns]
         
@@ -169,16 +203,16 @@ def processar_unificacao():
         # Seleção
         cols_com = ['Data', 'Técnico', 'Horas Vendidas']
         df_com = df_com[[c for c in cols_com if c in df_com.columns]]
-        
         cols_aprov = ['Data', 'Técnico', 'Disp', 'TP', 'TG']
         df_aprov = df_aprov[[c for c in cols_aprov if c in df_aprov.columns]]
 
-        # TRATAMENTO NUMÉRICO (IMPORTANTE)
-        for col in ['Horas Vendidas', 'Disp', 'TP', 'TG']:
+        # 1. CONVERTE PARA FLOAT (PARA CALCULAR/UNIR)
+        cols_numericas = ['Horas Vendidas', 'Disp', 'TP', 'TG']
+        for col in cols_numericas:
             if col in df_com.columns: df_com[col] = df_com[col].apply(converter_br_para_float)
             if col in df_aprov.columns: df_aprov[col] = df_aprov[col].apply(converter_br_para_float)
 
-        # Chaves como String para Merge
+        # Chaves String
         df_com['Key_D'] = df_com['Data'].astype(str)
         df_com['Key_T'] = df_com['Técnico'].astype(str)
         df_aprov['Key_D'] = df_aprov['Data'].astype(str)
@@ -190,70 +224,54 @@ def processar_unificacao():
             left_on=['Key_D', 'Key_T'], right_on=['Key_D', 'Key_T'], 
             how='outer', suffixes=('_C', '_A')
         )
-        
-        # Consolida Data e Técnico e Preenche Zeros
         df_final.fillna(0, inplace=True)
         
-        # Resolve conflito de nomes de colunas
         df_final['Data'] = df_final.apply(lambda x: x['Data_C'] if x['Data_C'] != 0 and str(x['Data_C']) != "0" else x['Data_A'], axis=1)
         df_final['Técnico'] = df_final.apply(lambda x: x['Técnico_C'] if x['Técnico_C'] != 0 and str(x['Técnico_C']) != "0" else x['Técnico_A'], axis=1)
 
-        # Seleciona Finais
         cols_finais = ['Data', 'Técnico', 'Horas Vendidas', 'Disp', 'TP', 'TG']
         df_final = df_final[[c for c in cols_finais if c in df_final.columns]]
 
-        # --- A CORREÇÃO DE PREENCHIMENTO ---
-        # Converte tudo para tipos nativos do Python para o Gspread não reclamar (numpy killers)
-        df_final = df_final.astype(object) 
-        df_final.fillna("", inplace=True) # JSON não aceita NaN
-        
-        try: ws_final = sh.worksheet("Consolidado")
-        except: ws_final = sh.add_worksheet(title="Consolidado", rows=2000, cols=20)
-        
-        ws_final.clear()
-        ws_final.update('A1', [df_final.columns.values.tolist()] + df_final.values.tolist())
+        # 2. CONVERTE DE VOLTA PARA STRING COM VÍRGULA (PARA PLANILHA BR)
+        # Isso garante que 8.3 vire "8,30" e o Sheets entenda.
+        for col in ['Horas Vendidas', 'Disp', 'TP', 'TG']:
+             df_final[col] = df_final[col].apply(float_para_string_br)
+
+        # Grava preservando formatação
+        atualizar_planilha_preservando_formato(sh, "Consolidado", df_final)
         return True
     except Exception as e:
         print(f"Erro unificação: {e}")
         return False
 
-# --- ROTINA MESTRA DE GRAVAÇÃO (GLOBAL) ---
+# --- ROTINA MESTRA ---
 def executar_rotina_global(df_com=None, df_aprov=None):
-    """Salva TUDO o que estiver disponível e atualiza o consolidado."""
     status_msg = st.empty()
     bar = st.progress(0)
-    
     try:
-        # 1. Salva Comissões se houver dados
         if df_com is not None and not df_com.empty:
             status_msg.info("💾 Salvando Comissões...")
             salvar_com_upsert("Comissoes", df_com, ["Data Processamento", "Sigla Técnico"])
             bar.progress(40)
         
-        # 2. Salva Aproveitamento se houver dados
         if df_aprov is not None and not df_aprov.empty:
             status_msg.info("💾 Salvando Aproveitamento...")
             salvar_com_upsert("Aproveitamento", df_aprov, ["Data", "Técnico"])
             bar.progress(70)
             
-        # 3. Sempre tenta unificar
-        status_msg.info("🔄 Atualizando Relatório Consolidado...")
+        status_msg.info("🔄 Unificando bases...")
         sucesso = processar_unificacao()
         bar.progress(100)
         
         if sucesso:
-            status_msg.success("✅ Processo Completo! Todas as bases foram atualizadas.")
+            status_msg.success("✅ Sucesso! Dados com vírgula e formatados.")
             st.balloons()
         else:
-            status_msg.warning("⚠️ Bases salvas, mas houve falha na unificação.")
+            status_msg.warning("⚠️ Salvo, mas erro na unificação.")
             
-    except Exception as e:
-        status_msg.error(f"Erro Crítico: {e}")
+    except Exception as e: status_msg.error(f"Erro: {e}")
 
-# ============================================
-# INTERFACE PRINCIPAL
-# ============================================
-
+# --- INTERFACE ---
 st.sidebar.title("Login Seguro")
 senha = st.sidebar.text_input("Senha:", type="password")
 
@@ -261,16 +279,10 @@ if senha == verificar_acesso():
     st.sidebar.success("Acesso Liberado")
     st.title("🏭 Central de Processamento WLM")
     
-    # Uploaders ficam fora das tabs para garantir acesso global? 
-    # Não, mantemos nas tabs por organização, mas checaremos o session state
-    
     aba1, aba2 = st.tabs(["💰 Comissões", "⚙️ Aproveitamento"])
-
-    # Variáveis globais para armazenar os dados processados
     df_comissao_global = None
     df_aprov_global = None
 
-    # --- ABA 1 ---
     with aba1:
         st.header("Upload Comissões")
         files_com = st.file_uploader("Arquivos HTML", accept_multiple_files=True, key="up_com")
@@ -280,7 +292,6 @@ if senha == verificar_acesso():
                 df_comissao_global = pd.DataFrame(dados_c, columns=["Data Processamento", "Nome do Arquivo", "Sigla Técnico", "Horas Vendidas"])
                 st.dataframe(df_comissao_global, height=200)
 
-    # --- ABA 2 ---
     with aba2:
         st.header("Upload Aproveitamento")
         files_aprov = st.file_uploader("Arquivos HTML/SLK", accept_multiple_files=True, key="up_aprov")
@@ -290,20 +301,11 @@ if senha == verificar_acesso():
                 df_aprov_global = pd.DataFrame(dados_a, columns=["Data", "Arquivo", "Técnico", "Disp", "TP", "TG"])
                 st.dataframe(df_aprov_global, height=200)
 
-    # --- BOTÃO DE AÇÃO GLOBAL (Visível em ambas as abas ou fixo) ---
     st.divider()
     col_btn, col_txt = st.columns([1, 4])
-    
     with col_btn:
-        # Este botão agora olha para TUDO
         if st.button("🚀 GRAVAR TUDO E ATUALIZAR", type="primary"):
-            if df_comissao_global is None and df_aprov_global is None:
-                st.warning("Nenhum arquivo carregado em nenhuma das abas.")
-            else:
-                executar_rotina_global(df_comissao_global, df_aprov_global)
-    
-    with col_txt:
-        st.caption("ℹ️ Este botão salva os arquivos de Comissões E Aproveitamento simultaneamente, se estiverem carregados, e regenera o painel do Looker Studio.")
-
+            if df_comissao_global is None and df_aprov_global is None: st.warning("Sem arquivos.")
+            else: executar_rotina_global(df_comissao_global, df_aprov_global)
 else:
     st.error("Senha incorreta.")
