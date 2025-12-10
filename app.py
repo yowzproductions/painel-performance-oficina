@@ -25,84 +25,79 @@ def conectar_sheets():
     client = gspread.authorize(creds)
     return client
 
+# --- O MOTOR DE UNIFICAÇÃO (Agora roda nos bastidores) ---
 def processar_unificacao():
     """
-    Lê as abas com os nomes exatos fornecidos e cruza os dados.
+    Lê as abas, cruza os dados e atualiza o Consolidado automaticamente.
     """
-    client = conectar_sheets()
-    sh = client.open_by_key(ID_PLANILHA_MESTRA)
-
-    # 1. Ler as abas de origem
     try:
-        ws_com = sh.worksheet("Comissoes")
-        ws_aprov = sh.worksheet("Aproveitamento")
-    except:
-        return False, "Erro: As abas 'Comissoes' ou 'Aproveitamento' não foram encontradas."
+        client = conectar_sheets()
+        sh = client.open_by_key(ID_PLANILHA_MESTRA)
 
-    # 2. Ler os dados
-    dados_com = ws_com.get_all_records()
-    dados_aprov = ws_aprov.get_all_records()
+        # 1. Ler as abas de origem
+        try:
+            ws_com = sh.worksheet("Comissoes")
+            ws_aprov = sh.worksheet("Aproveitamento")
+        except:
+            return False
 
-    if not dados_com or not dados_aprov:
-        return False, "Uma das abas está vazia. Faça upload dos arquivos primeiro."
+        # 2. Ler os dados
+        dados_com = ws_com.get_all_records()
+        dados_aprov = ws_aprov.get_all_records()
 
-    df_com = pd.DataFrame(dados_com)
-    df_aprov = pd.DataFrame(dados_aprov)
+        if not dados_com or not dados_aprov:
+            return False
 
-    # 3. Limpeza de Nomes de Colunas (Remove espaços acidentais)
-    df_com.columns = [c.strip() for c in df_com.columns]
-    df_aprov.columns = [c.strip() for c in df_aprov.columns]
+        df_com = pd.DataFrame(dados_com)
+        df_aprov = pd.DataFrame(dados_aprov)
 
-    # --- AJUSTE DE NOMES ---
-    # Mapear as colunas da aba Comissões para um padrão comum
-    renomear_comissao = {
-        "Data Processamento": "Data",
-        "Sigla Técnico": "Técnico"
-    }
-    df_com.rename(columns=renomear_comissao, inplace=True)
+        # 3. Limpeza de Colunas
+        df_com.columns = [c.strip() for c in df_com.columns]
+        df_aprov.columns = [c.strip() for c in df_aprov.columns]
 
-    # Verifica se a troca funcionou
-    if "Data" not in df_com.columns or "Técnico" not in df_com.columns:
-        return False, f"Erro: Não achei as colunas 'Data Processamento' ou 'Sigla Técnico' na aba Comissões. Colunas lidas: {df_com.columns.tolist()}"
+        # 4. Ajuste de Nomes (Mapeamento)
+        renomear_comissao = {"Data Processamento": "Data", "Sigla Técnico": "Técnico"}
+        df_com.rename(columns=renomear_comissao, inplace=True)
 
-    # Na aba Aproveitamento, os nomes já devem ser "Data" e "Técnico".
-    if "Data" not in df_aprov.columns or "Técnico" not in df_aprov.columns:
-        return False, f"Erro: Não achei as colunas 'Data' ou 'Técnico' na aba Aproveitamento. Colunas lidas: {df_aprov.columns.tolist()}"
+        if "Data" not in df_com.columns or "Técnico" not in df_com.columns:
+            return False
+        if "Data" not in df_aprov.columns or "Técnico" not in df_aprov.columns:
+            return False
 
-    # 4. Padronização de Tipos (Texto)
-    df_com['Data'] = df_com['Data'].astype(str)
-    df_com['Técnico'] = df_com['Técnico'].astype(str)
-    df_aprov['Data'] = df_aprov['Data'].astype(str)
-    df_aprov['Técnico'] = df_aprov['Técnico'].astype(str)
+        # 5. Padronização
+        df_com['Data'] = df_com['Data'].astype(str)
+        df_com['Técnico'] = df_com['Técnico'].astype(str)
+        df_aprov['Data'] = df_aprov['Data'].astype(str)
+        df_aprov['Técnico'] = df_aprov['Técnico'].astype(str)
 
-    # 5. O Merge (Cruzamento)
-    # Une as duas tabelas usando Data e Técnico como chave
-    df_final = pd.merge(
-        df_com, 
-        df_aprov, 
-        on=['Data', 'Técnico'], 
-        how='outer', 
-        suffixes=('_Comissao', '_Aprov')
-    )
-    
-    df_final.fillna("", inplace=True)
+        # 6. Merge
+        df_final = pd.merge(
+            df_com, 
+            df_aprov, 
+            on=['Data', 'Técnico'], 
+            how='outer', 
+            suffixes=('_Comissao', '_Aprov')
+        )
+        df_final.fillna("", inplace=True)
 
-    # 6. Salvar na aba 'Consolidado'
-    try:
-        ws_final = sh.worksheet("Consolidado")
-        ws_final.clear()
-    except:
-        ws_final = sh.add_worksheet(title="Consolidado", rows=1000, cols=20)
-    
-    ws_final.update([df_final.columns.values.tolist()] + df_final.values.tolist())
-    
-    return True, f"Sucesso! {len(df_final)} linhas consolidadas."
+        # 7. Salvar
+        try:
+            ws_final = sh.worksheet("Consolidado")
+            ws_final.clear()
+        except:
+            ws_final = sh.add_worksheet(title="Consolidado", rows=1000, cols=20)
+        
+        ws_final.update([df_final.columns.values.tolist()] + df_final.values.tolist())
+        return True
 
-# --- INTERFACE (TABS) ---
-aba_comissoes, aba_aproveitamento, aba_unificacao = st.tabs([
+    except Exception as e:
+        print(f"Erro silencioso na unificação: {e}")
+        return False
+
+# --- INTERFACE (Apenas 2 Tabs agora) ---
+aba_comissoes, aba_aproveitamento = st.tabs([
     "💰 Pagamento de Comissões", 
-    "⚙️ Aproveitamento Técnico",
-    "📊 Relatório Unificado"
+    "⚙️ Aproveitamento Técnico"
 ])
 
 # --- TAB 1: COMISSÕES ---
@@ -139,18 +134,33 @@ with aba_comissoes:
             except Exception as e: st.error(f"Erro: {e}")
 
         if len(dados_comissao) > 0:
-            # AJUSTE DE COLUNAS AQUI TAMBÉM
             colunas_comissao = ["Data Processamento", "Nome do Arquivo", "Sigla Técnico", "Horas Vendidas"]
             df_comissao = pd.DataFrame(dados_comissao, columns=colunas_comissao)
             st.dataframe(df_comissao)
             
-            if st.button("Gravar Comissões", key="btn_comissao"):
-                with st.spinner("Enviando..."):
-                    client = conectar_sheets(); aba = client.open_by_key(ID_PLANILHA_MESTRA).worksheet("Comissoes")
+            if st.button("💾 Gravar Comissões e Atualizar Base", key="btn_comissao"):
+                # Barra de progresso visual
+                progresso = st.progress(0, text="Iniciando gravação...")
+                
+                try:
+                    # Passo 1: Gravar Comissões
+                    progresso.progress(30, text="Enviando dados para a nuvem...")
+                    client = conectar_sheets()
+                    aba = client.open_by_key(ID_PLANILHA_MESTRA).worksheet("Comissoes")
                     if not aba.get_all_values():
                         aba.append_row(colunas_comissao)
                     aba.append_rows(dados_comissao)
-                    st.success("✅ Sucesso!")
+                    
+                    # Passo 2: Disparar Unificação
+                    progresso.progress(70, text="Recalculando Relatório Unificado...")
+                    processar_unificacao()
+                    
+                    progresso.progress(100, text="Concluído!")
+                    st.success("✅ Sucesso! Comissões gravadas e Relatório Consolidado atualizado.")
+                    st.balloons()
+                    
+                except Exception as e:
+                    st.error(f"Erro ao gravar: {e}")
 
 # --- TAB 2: APROVEITAMENTO ---
 with aba_aproveitamento:
@@ -199,34 +209,32 @@ with aba_aproveitamento:
             except Exception as e: st.error(f"Erro leitura: {e}")
 
         if len(dados_aprov) > 0:
-            # AJUSTE DE COLUNAS AQUI TAMBÉM
             colunas_aprov = ["Data", "Arquivo", "Técnico", "Disp", "TP", "TG"]
             df_aprov = pd.DataFrame(dados_aprov, columns=colunas_aprov)
             
             st.success(f"✅ Sucesso! {len(dados_aprov)} registros.")
             st.dataframe(df_aprov)
             
-            if st.button("Gravar Aproveitamento", key="btn_aprov"):
-                with st.spinner("Enviando..."):
-                    client = conectar_sheets(); aba = client.open_by_key(ID_PLANILHA_MESTRA).worksheet("Aproveitamento")
+            if st.button("💾 Gravar Aproveitamento e Atualizar Base", key="btn_aprov"):
+                # Barra de progresso visual
+                progresso = st.progress(0, text="Iniciando gravação...")
+                
+                try:
+                    # Passo 1: Gravar Aproveitamento
+                    progresso.progress(30, text="Enviando dados para a nuvem...")
+                    client = conectar_sheets()
+                    aba = client.open_by_key(ID_PLANILHA_MESTRA).worksheet("Aproveitamento")
                     if not aba.get_all_values():
                         aba.append_row(colunas_aprov)
                     aba.append_rows(dados_aprov)
-                    st.success("✅ Gravado!")
-
-# --- TAB 3: RELATÓRIO UNIFICADO ---
-with aba_unificacao:
-    st.header("🔗 Unificação de Dados (Comissões + Aproveitamento)")
-    st.info("Este módulo lê 'Data Processamento' e 'Sigla Técnico' da aba Comissões e cruza com 'Data' e 'Técnico' da aba Aproveitamento.")
-    
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        if st.button("🚀 Gerar Relatório Unificado"):
-            with st.spinner("Lendo planilhas e cruzando dados..."):
-                sucesso, mensagem = processar_unificacao()
-                if sucesso:
-                    st.success(mensagem)
+                    
+                    # Passo 2: Disparar Unificação
+                    progresso.progress(70, text="Recalculando Relatório Unificado...")
+                    processar_unificacao()
+                    
+                    progresso.progress(100, text="Concluído!")
+                    st.success("✅ Sucesso! Aproveitamento gravado e Relatório Consolidado atualizado.")
                     st.balloons()
-                else:
-                    st.error(mensagem)
-                
+                    
+                except Exception as e:
+                    st.error(f"Erro ao gravar: {e}")
