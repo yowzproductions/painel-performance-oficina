@@ -7,10 +7,8 @@ from datetime import datetime
 import re
 
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Processador de Comissões", layout="wide")
-
-st.title("📊 Processador de Comissões em Lote (Multi-Arquivos)")
-st.write("Arraste VÁRIOS relatórios de dias diferentes. O sistema organizará tudo automaticamente.")
+st.set_page_config(page_title="Central de Relatórios WLM", layout="wide")
+st.title("🏭 Central de Processamento de Relatórios")
 
 # --- 2. CONEXÃO SEGURA ---
 def conectar_sheets():
@@ -21,101 +19,170 @@ def conectar_sheets():
     client = gspread.authorize(creds)
     return client
 
-# --- 3. UPLOAD DO ARQUIVO (Agora aceita múltiplos!) ---
-# Mudança chave: accept_multiple_files=True
-arquivos = st.file_uploader("Solte seus relatórios HTML aqui", type=["html", "htm"], accept_multiple_files=True)
+# ID DA SUA PLANILHA
+ID_PLANILHA_MESTRA = "1XibBlm2x46Dk5bf4JvfrMepD4gITdaOtTALSgaFcwV0"
 
-# Só começa se tiver pelo menos 1 arquivo
-if arquivos:
-    dados_para_enviar = [] # Lista única para acumular dados de TODOS os arquivos
+# --- ABAS ---
+aba_comissoes, aba_aproveitamento = st.tabs(["💰 Pagamento de Comissões", "⚙️ Aproveitamento Técnico"])
+
+# ==============================================================================
+# SISTEMA 1: PAGAMENTO DE COMISSÕES (MANTIDO IGUAL)
+# ==============================================================================
+with aba_comissoes:
+    st.header("Processador de Comissões")
+    st.write("Arraste os relatórios de 'Pagamento de Comissões' (HTML).")
     
-    st.write(f"📂 Iniciando processamento de {len(arquivos)} arquivos...")
-    
-    # --- LOOP PARA LER CADA ARQUIVO DA LISTA ---
-    for arquivo_atual in arquivos:
-        try:
-            # Lê o arquivo atual
-            conteudo = arquivo_atual.read().decode("utf-8", errors='ignore')
-            soup = BeautifulSoup(conteudo, "html.parser")
-            
-            # --- CAPTURA A DATA DESTE ARQUIVO ESPECÍFICO ---
-            texto_completo = soup.get_text(separator=" ", strip=True)
-            match_data = re.search(r"até\s+(\d{2}/\d{2}/\d{4})", texto_completo, re.IGNORECASE)
-            
-            if match_data:
-                data_relatorio = match_data.group(1)
-            else:
-                match_generico = re.search(r"(\d{2}/\d{2}/\d{4})", texto_completo)
-                if match_generico:
-                    data_relatorio = match_generico.group(1)
-                else:
-                    data_relatorio = datetime.now().strftime("%d/%m/%Y")
+    arquivos_comissao = st.file_uploader("Upload Comissões HTML", type=["html", "htm"], accept_multiple_files=True, key="uploader_comissao")
 
-            # --- PROCESSAMENTO DOS TÉCNICOS ---
-            tecnico_atual = None
-            linhas = soup.find_all("tr")
-            
-            for linha in linhas:
-                texto_linha = linha.get_text(separator=" ", strip=True).upper()
-                
-                # Trava de fim de arquivo
-                if "TOTAL DA FILIAL" in texto_linha or "TOTAL DA EMPRESA" in texto_linha:
-                    break
-                
-                # Identifica Técnico
-                if "TOTAL DO FUNCIONARIO" in texto_linha:
-                    try:
-                        parte_nome = texto_linha.split("TOTAL DO FUNCIONARIO")[1]
-                        texto_sujo = parte_nome.replace(":", "").strip()
-                        tecnico_atual = texto_sujo.split()[0] # Pega só a sigla
-                    except:
-                        continue 
-                        
-                # Pega Horas
-                if tecnico_atual and "HORAS VENDIDAS:" in texto_linha:
-                    celulas = linha.find_all("td")
-                    for celula in celulas:
-                        texto_celula = celula.get_text(strip=True).upper()
-                        if "HORAS" in texto_celula and any(c.isdigit() for c in texto_celula) and "VENDIDAS" not in texto_celula:
-                            valor_limpo = texto_celula.replace("HORAS", "").strip()
-                            
-                            # Adiciona à lista geral
-                            # Note que 'arquivo_atual.name' muda a cada loop
-                            dados_para_enviar.append([data_relatorio, arquivo_atual.name, tecnico_atual, valor_limpo])
-                            break 
-                            
-        except Exception as e:
-            st.error(f"Erro ao ler o arquivo {arquivo_atual.name}: {e}")
-
-    # --- 4. EXIBIÇÃO E ENVIO (Tudo de uma vez) ---
-    if len(dados_para_enviar) > 0:
-        df = pd.DataFrame(dados_para_enviar, columns=["Data Ref.", "Arquivo Original", "Técnico", "Horas"])
-        st.success(f"✅ Processamento concluído! Total de {len(dados_para_enviar)} registros extraídos de {len(arquivos)} arquivos.")
-        st.dataframe(df)
+    if arquivos_comissao:
+        dados_comissao = []
+        st.write(f"📂 Processando {len(arquivos_comissao)} arquivos...")
         
-        if st.button("Confirmar e Gravar TUDO no Sheets"):
-            with st.spinner("Enviando lote gigante para o Google..."):
-                try:
-                    client = conectar_sheets()
-                    ID_PLANILHA = "1XibBlm2x46Dk5bf4JvfrMepD4gITdaOtTALSgaFcwV0" # Seu ID
-                    arquivo_sheet = client.open_by_key(ID_PLANILHA)
+        for arquivo in arquivos_comissao:
+            try:
+                conteudo = arquivo.read().decode("utf-8", errors='ignore')
+                soup = BeautifulSoup(conteudo, "html.parser")
+                
+                texto_completo = soup.get_text(separator=" ", strip=True)
+                match_data = re.search(r"até\s+(\d{2}/\d{2}/\d{4})", texto_completo, re.IGNORECASE)
+                data_relatorio = match_data.group(1) if match_data else datetime.now().strftime("%d/%m/%Y")
+
+                tecnico_atual = None
+                linhas = soup.find_all("tr")
+                
+                for linha in linhas:
+                    texto_linha = linha.get_text(separator=" ", strip=True).upper()
                     
+                    if "TOTAL DA FILIAL" in texto_linha or "TOTAL DA EMPRESA" in texto_linha:
+                        break
+                    
+                    if "TOTAL DO FUNCIONARIO" in texto_linha:
+                        try:
+                            # Limpeza da Sigla (Comissões)
+                            tecnico_atual = texto_linha.split("TOTAL DO FUNCIONARIO")[1].replace(":", "").strip().split()[0]
+                        except:
+                            continue 
+                            
+                    if tecnico_atual and "HORAS VENDIDAS:" in texto_linha:
+                        celulas = linha.find_all("td")
+                        for celula in celulas:
+                            texto_celula = celula.get_text(strip=True).upper()
+                            if "HORAS" in texto_celula and any(c.isdigit() for c in texto_celula) and "VENDIDAS" not in texto_celula:
+                                valor_limpo = texto_celula.replace("HORAS", "").strip()
+                                dados_comissao.append([data_relatorio, arquivo.name, tecnico_atual, valor_limpo])
+                                break 
+            except Exception as e:
+                st.error(f"Erro no arquivo {arquivo.name}: {e}")
+
+        if len(dados_comissao) > 0:
+            df_comissao = pd.DataFrame(dados_comissao, columns=["Data Ref.", "Arquivo", "Técnico", "Horas"])
+            st.dataframe(df_comissao)
+            
+            if st.button("Gravar Comissões no Sheets", key="btn_comissao"):
+                with st.spinner("Enviando..."):
                     try:
-                        aba = arquivo_sheet.worksheet("Comissoes")
-                    except:
-                        st.error("❌ Erro: Aba 'Comissoes' não encontrada.")
-                        st.stop()
+                        client = conectar_sheets()
+                        sheet = client.open_by_key(ID_PLANILHA_MESTRA)
+                        aba = sheet.worksheet("Comissoes")
+                        aba.append_rows(dados_comissao)
+                        st.success(f"✅ Sucesso! {len(dados_comissao)} linhas gravadas.")
+                    except Exception as e:
+                        if "200" in str(e): st.success("✅ Sucesso (200).")
+                        else: st.error(f"Erro: {e}")
+
+# ==============================================================================
+# SISTEMA 2: APROVEITAMENTO TÉCNICO (DATA E SIGLA LIMPAS)
+# ==============================================================================
+with aba_aproveitamento:
+    st.header("Extrator de Aproveitamento (T.Disp / TP / TG)")
+    st.write("Arraste os relatórios de 'Aproveitamento Tempo Mecânico' (HTML).")
+    
+    arquivos_aprov = st.file_uploader("Upload Aproveitamento HTML", type=["html", "htm"], accept_multiple_files=True, key="uploader_aprov")
+    
+    if arquivos_aprov:
+        dados_aprov = []
+        st.write(f"📂 Processando {len(arquivos_aprov)} arquivos...")
+        
+        for arquivo in arquivos_aprov:
+            try:
+                conteudo = arquivo.read().decode("utf-8", errors='ignore')
+                soup = BeautifulSoup(conteudo, "html.parser")
+                tecnico_atual_aprov = None
+                linhas = soup.find_all("tr")
+                
+                for linha in linhas:
+                    texto_linha = linha.get_text(separator=" ", strip=True).upper()
                     
-                    aba.append_rows(dados_para_enviar)
-                    
-                    st.balloons()
-                    st.success(f"✅ Sucesso Absoluto! {len(dados_para_enviar)} linhas gravadas.")
-                    
-                except Exception as e:
-                    if "200" in str(e):
-                        st.balloons()
-                        st.success("✅ Sucesso confirmado (Protocolo 200).")
-                    else:
-                        st.error(f"Erro no envio: {e}")
-    else:
-        st.warning("Nenhum dado válido encontrado nos arquivos enviados.")
+                    if "TOTAL FILIAL:" in texto_linha:
+                        break
+
+                    # 1. Identifica e LIMPA o Técnico
+                    if "MECÂNICO:" in texto_linha or "MECANICO:" in texto_linha:
+                        try:
+                            # Pega o que vem depois de MECANICO:
+                            parte_direita = texto_linha.split("MECANICO:")[1] if "MECANICO:" in texto_linha else texto_linha.split("MECÂNICO:")[1]
+                            
+                            # Lógica de Limpeza Pesada:
+                            # Se tiver traço ("AAD - ALLAN"), pega só o que vem antes do traço
+                            if "-" in parte_direita:
+                                tecnico_limpo = parte_direita.split("-")[0].strip()
+                            else:
+                                # Se não tiver traço ("AAD ALLAN"), pega só a primeira palavra
+                                tecnico_limpo = parte_direita.strip().split()[0]
+                            
+                            tecnico_atual_aprov = tecnico_limpo
+                        except:
+                            continue
+
+                    if "TOT.MEC.:" in texto_linha:
+                        tecnico_atual_aprov = None
+                        continue
+
+                    # 2. Identifica e LIMPA a Data
+                    if tecnico_atual_aprov:
+                        celulas = linha.find_all("td")
+                        if not celulas: continue
+                        
+                        texto_primeira_celula = celulas[0].get_text(strip=True)
+                        
+                        # Verifica se começa com formato de data DD/MM/YY
+                        if re.match(r"\d{2}/\d{2}/\d{2}", texto_primeira_celula):
+                            try:
+                                # LIMPEZA DA DATA:
+                                # Pega "01/12/25 SEG", divide por espaço e pega só o índice [0]
+                                data_limpa = texto_primeira_celula.split()[0] 
+                                
+                                t_disp = celulas[1].get_text(strip=True)
+                                tp = celulas[2].get_text(strip=True)
+                                tg = celulas[3].get_text(strip=True)
+                                
+                                # Adiciona os dados já limpos
+                                dados_aprov.append([data_limpa, arquivo.name, tecnico_atual_aprov, t_disp, tp, tg])
+                            except IndexError:
+                                continue
+
+            except Exception as e:
+                st.error(f"Erro ao ler arquivo {arquivo.name}: {e}")
+                
+        if len(dados_aprov) > 0:
+            df_aprov = pd.DataFrame(dados_aprov, columns=["Data", "Arquivo", "Técnico", "T. Disp", "TP", "TG"])
+            st.success(f"Encontrei {len(dados_aprov)} registros limpos!")
+            st.dataframe(df_aprov)
+            
+            if st.button("Gravar Aproveitamento no Sheets", key="btn_aprov"):
+                with st.spinner("Enviando..."):
+                    try:
+                        client = conectar_sheets()
+                        sheet = client.open_by_key(ID_PLANILHA_MESTRA)
+                        
+                        try:
+                            aba = sheet.worksheet("Aproveitamento")
+                        except:
+                            st.error("❌ Erro: Crie a aba 'Aproveitamento'!")
+                            st.stop()
+                            
+                        aba.append_rows(dados_aprov)
+                        st.success(f"✅ Sucesso! Dados gravados na aba 'Aproveitamento'.")
+                    except Exception as e:
+                        if "200" in str(e): st.success("✅ Sucesso (200).")
+                        else: st.error(f"Erro: {e}")
