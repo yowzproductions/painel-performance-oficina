@@ -7,12 +7,15 @@ from datetime import datetime
 import re
 import unicodedata
 
-# --- FUNÇÃO: REMOVER ACENTOS ---
-def remover_acentos(texto):
-    return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
-
+# --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Central de Relatórios WLM", layout="wide")
 st.title("🏭 Central de Processamento de Relatórios")
+
+ID_PLANILHA_MESTRA = "1XibBlm2x46Dk5bf4JvfrMepD4gITdaOtTALSgaFcwV0"
+
+# --- FUNÇÕES AUXILIARES ---
+def remover_acentos(texto):
+    return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
 
 def conectar_sheets():
     scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
@@ -21,11 +24,71 @@ def conectar_sheets():
     client = gspread.authorize(creds)
     return client
 
-ID_PLANILHA_MESTRA = "1XibBlm2x46Dk5bf4JvfrMepD4gITdaOtTALSgaFcwV0"
+def processar_unificacao():
+    """Lê Comissões e Aproveitamento, une os dados e salva na aba Consolidado."""
+    client = conectar_sheets()
+    sh = client.open_by_key(ID_PLANILHA_MESTRA)
 
-aba_comissoes, aba_aproveitamento = st.tabs(["💰 Pagamento de Comissões", "⚙️ Aproveitamento Técnico"])
+    # 1. Ler as abas de origem
+    try:
+        ws_com = sh.worksheet("Comissoes")
+        ws_aprov = sh.worksheet("Aproveitamento")
+    except:
+        return False, "Erro: Certifique-se que as abas 'Comissoes' e 'Aproveitamento' existem e têm dados."
 
-# --- SISTEMA 1 (COMISSÕES) MANTIDO IGUAL ---
+    # 2. Converter para DataFrame
+    df_com = pd.DataFrame(ws_com.get_all_records())
+    df_aprov = pd.DataFrame(ws_aprov.get_all_records())
+
+    if df_com.empty or df_aprov.empty:
+        return False, "Uma das abas (Comissoes ou Aproveitamento) está vazia."
+
+    # 3. Padronização para o Cruzamento (ETL)
+    # Renomeia 'Data Ref.' para 'Data' para bater com a outra tabela
+    if 'Data Ref.' in df_com.columns:
+        df_com.rename(columns={'Data Ref.': 'Data'}, inplace=True)
+    
+    # Converte chaves para texto (String) para evitar erro de tipo
+    df_com['Data'] = df_com['Data'].astype(str)
+    df_com['Técnico'] = df_com['Técnico'].astype(str)
+    df_aprov['Data'] = df_aprov['Data'].astype(str)
+    df_aprov['Técnico'] = df_aprov['Técnico'].astype(str)
+
+    # 4. O Merge (Cruzamento)
+    # Usa 'Data' e 'Técnico' como âncoras. 'outer' garante que ninguém suma.
+    df_final = pd.merge(
+        df_com, 
+        df_aprov, 
+        on=['Data', 'Técnico'], 
+        how='outer', 
+        suffixes=('_Comissao', '_Aprov')
+    )
+    
+    # Preenche vazios com string vazia
+    df_final.fillna("", inplace=True)
+
+    # 5. Salvar na aba 'Consolidado'
+    try:
+        ws_final = sh.worksheet("Consolidado")
+        ws_final.clear()
+    except:
+        # Se não existir, cria a aba
+        ws_final = sh.add_worksheet(title="Consolidado", rows=1000, cols=20)
+    
+    # Update final
+    ws_final.update([df_final.columns.values.tolist()] + df_final.values.tolist())
+    
+    return True, f"Sucesso! {len(df_final)} linhas consolidadas."
+
+# --- INTERFACE (TABS) ---
+# Agora temos 3 abas
+aba_comissoes, aba_aproveitamento, aba_unificacao = st.tabs([
+    "💰 Pagamento de Comissões", 
+    "⚙️ Aproveitamento Técnico",
+    "📊 Relatório Unificado"
+])
+
+# --- TAB 1: COMISSÕES ---
 with aba_comissoes:
     st.header("Processador de Comissões")
     arquivos_comissao = st.file_uploader("Upload Comissões HTML", type=["html", "htm"], accept_multiple_files=True, key="uploader_comissao")
@@ -66,7 +129,7 @@ with aba_comissoes:
                     client = conectar_sheets(); aba = client.open_by_key(ID_PLANILHA_MESTRA).worksheet("Comissoes")
                     aba.append_rows(dados_comissao); st.success("✅ Sucesso!")
 
-# --- SISTEMA 2 (APROVEITAMENTO) COM RAIO-X ---
+# --- TAB 2: APROVEITAMENTO ---
 with aba_aproveitamento:
     st.header("Extrator de Aproveitamento")
     arquivos_aprov = st.file_uploader("Upload Aproveitamento HTML", type=["html", "htm"], accept_multiple_files=True, key="uploader_aprov")
@@ -78,17 +141,15 @@ with aba_aproveitamento:
         for arquivo in arquivos_aprov:
             try:
                 raw_data = arquivo.read()
-                # TENTATIVA TRIPLA DE CODIFICAÇÃO
                 try: conteudo = raw_data.decode("utf-8")
                 except:
                     try: conteudo = raw_data.decode("latin-1")
-                    except: conteudo = raw_data.decode("utf-16") # Nova tentativa
+                    except: conteudo = raw_data.decode("utf-16")
                 
                 soup = BeautifulSoup(conteudo, "html.parser")
                 tecnico_atual_aprov = None
                 linhas = soup.find_all("tr")
                 
-                # Guarda as 10 primeiras linhas para o Raio-X
                 for i, l in enumerate(linhas[:10]):
                     amostra_linhas.append(l.get_text(separator=" ", strip=True))
 
@@ -98,14 +159,10 @@ with aba_aproveitamento:
                     
                     if "TOTAL FILIAL:" in texto_original: break
 
-                    # Busca mais flexível (Aceita "MECANICO" ou "MECÂNICO" ou "MECANICO:")
                     if "MECANICO" in texto_limpo and "TOT.MEC" not in texto_limpo:
                         try:
-                            # Divide por MECANICO (ignorando se tem dois pontos ou não)
                             parte_direita = texto_limpo.split("MECANICO")[1]
-                            # Limpa : se tiver sobrado
                             parte_direita = parte_direita.replace(":", "").strip()
-                            
                             if "-" in parte_direita: tecnico_atual_aprov = parte_direita.split("-")[0].strip()
                             else: tecnico_atual_aprov = parte_direita.split()[0]
                         except: continue
@@ -132,7 +189,6 @@ with aba_aproveitamento:
             st.success(f"✅ Sucesso! {len(dados_aprov)} registros.")
             st.dataframe(df_aprov)
             if st.button("Gravar Aproveitamento", key="btn_aprov"):
-                # ... código de gravação igual ...
                 with st.spinner("Enviando..."):
                     client = conectar_sheets(); aba = client.open_by_key(ID_PLANILHA_MESTRA).worksheet("Aproveitamento")
                     aba.append_rows(dados_aprov); st.success("✅ Gravado!")
@@ -144,3 +200,20 @@ with aba_aproveitamento:
                         st.text(l)
                 else:
                     st.error("O robô não encontrou nenhuma linha de tabela (<tr>). O arquivo pode não ser um HTML padrão.")
+
+# --- TAB 3: RELATÓRIO UNIFICADO (NOVO) ---
+with aba_unificacao:
+    st.header("🔗 Unificação de Dados (Comissões + Aproveitamento)")
+    st.info("Este módulo lê os dados que já estão no Google Sheets, cruza as informações por 'Data' e 'Técnico' e gera uma tabela consolidada.")
+    
+    col1, col2 = st.columns([1, 4])
+    
+    with col1:
+        if st.button("🚀 Gerar Relatório Unificado"):
+            with st.spinner("Lendo planilhas e cruzando dados..."):
+                sucesso, mensagem = processar_unificacao()
+                if sucesso:
+                    st.success(mensagem)
+                    st.balloons()
+                else:
+                    st.error(mensagem)
