@@ -24,8 +24,8 @@ def conectar_sheets():
 
 def converter_br_para_float(valor):
     """
-    BLINDAGEM DE DADOS:
-    Recebe qualquer coisa ("8,30", "1.200,50", 8.3) e devolve FLOAT PURO (8.3).
+    Limpa o valor para garantir que seja processável como número.
+    Nota: A divisão por 100 ocorrerá APENAS na exportação final.
     """
     if pd.isna(valor) or valor == "": 
         return 0.0
@@ -33,28 +33,23 @@ def converter_br_para_float(valor):
     if isinstance(valor, (int, float)): 
         return float(valor)
     
-    # 1. Limpeza pesada de texto (tira espaços invisíveis do HTML)
     valor_str = str(valor).strip()
     valor_str = valor_str.replace('\xa0', '').replace('R$', '').strip()
 
     if not valor_str:
         return 0.0
 
-    # 2. Lógica Brasileira
-    # Se tem ponto e vírgula (Ex: 1.200,50), o ponto é milhar -> Removemos
+    # Remove ponto de milhar se existir
     if '.' in valor_str and ',' in valor_str: 
         valor_str = valor_str.replace('.', '')
     
-    # 3. A Vírgula vira Ponto (Ex: 8,30 -> 8.30) para o Python entender
+    # Troca vírgula por ponto para o Python entender
     valor_str = valor_str.replace(',', '.')
 
     try: 
         return float(valor_str)
     except: 
         return 0.0
-
-# OBS: REMOVI A FUNÇÃO 'float_para_string_br'. 
-# NÃO VAMOS MAIS TRANSFORMAR EM TEXTO. ENVIAREMOS NÚMEROS.
 
 def verificar_acesso():
     try:
@@ -64,7 +59,7 @@ def verificar_acesso():
         except: return 'admin'
     except: return None
 
-# --- PARSERS (LEITURA DOS ARQUIVOS) ---
+# --- PARSERS (LEITURA) ---
 def parse_comissoes(arquivos):
     dados = []
     for arquivo in arquivos:
@@ -93,7 +88,6 @@ def parse_comissoes(arquivos):
                     celulas = linha.find_all("td")
                     for celula in celulas:
                         txt = celula.get_text(strip=True).upper()
-                        # Extrai apenas se parecer número
                         if "HORAS" in txt and any(c.isdigit() for c in txt) and "VENDIDAS" not in txt:
                             valor_limpo = txt.replace("HORAS", "").strip()
                             dados.append([data_relatorio, arquivo.name, tecnico_atual, valor_limpo])
@@ -147,30 +141,24 @@ def parse_aproveitamento(arquivos):
         except Exception as e: st.error(f"Erro no arquivo {arquivo.name}: {e}")
     return dados
 
-# --- GRAVAÇÃO (SEM MAQUIAGEM DE TEXTO) ---
+# --- GRAVAÇÃO ---
 def atualizar_planilha_preservando_formato(sh, nome_aba, df_final):
     try:
         ws = sh.worksheet(nome_aba)
     except:
         ws = sh.add_worksheet(title=nome_aba, rows=2000, cols=20)
 
-    # 1. Cabeçalho
     if not ws.get_all_values():
         ws.update('A1', [df_final.columns.values.tolist()])
         try: ws.format('A1:Z1', {'textFormat': {'bold': True}})
         except: pass
 
-    # 2. Limpa Dados
     ws.batch_clear(["A2:Z10000"])
-
-    # 3. Prepara Dados: ATENÇÃO AQUI
-    # Trocamos NaN por 0.0 (número) e NÃO convertemos para string.
+    
+    # Preenche vazios com 0.0
     df_final = df_final.fillna(0.0)
     
-    # 4. Envia RAW DATA (Números Puros)
-    # O Python manda 8.3 -> O Google recebe 8.3 -> O Google exibe 8,30 (se configurado)
     dados_para_enviar = df_final.values.tolist()
-    
     if dados_para_enviar:
         ws.update('A2', dados_para_enviar)
         
@@ -195,12 +183,10 @@ def salvar_com_upsert(nome_aba, novos_dados_df, colunas_chaves):
     df_total = pd.concat([df_antigo, novos_dados_df])
     df_final = df_total.drop_duplicates(subset=colunas_chaves, keep='last')
     
-    # Nota: Aqui salvamos como String porque é armazenamento intermediário.
-    # A mágica da conversão numérica acontece na UNIFICAÇÃO.
     atualizar_planilha_preservando_formato(sh, nome_aba, df_final)
     return len(df_final)
 
-# --- UNIFICAÇÃO (CORRIGIDA - MODO MATEMÁTICO) ---
+# --- UNIFICAÇÃO (COM A REGRA DE DIVISÃO POR 100) ---
 def processar_unificacao():
     try:
         client = conectar_sheets()
@@ -216,50 +202,50 @@ def processar_unificacao():
         df_com = pd.DataFrame(dados_com)
         df_aprov = pd.DataFrame(dados_aprov)
 
-        # Limpeza
+        # Limpeza e Padronização
         df_com.columns = [c.strip() for c in df_com.columns]
         df_aprov.columns = [c.strip() for c in df_aprov.columns]
         renomear_comissao = {"Data Processamento": "Data", "Sigla Técnico": "Técnico"}
         df_com.rename(columns=renomear_comissao, inplace=True)
 
-        # Seleção
         cols_com = ['Data', 'Técnico', 'Horas Vendidas']
         df_com = df_com[[c for c in cols_com if c in df_com.columns]]
         cols_aprov = ['Data', 'Técnico', 'Disp', 'TP', 'TG']
         df_aprov = df_aprov[[c for c in cols_aprov if c in df_aprov.columns]]
 
-        # --- AQUI É O SEGREDO ---
-        # Convertemos TUDO para FLOAT PYTHON (8.3)
+        # Conversão Inicial
         cols_numericas = ['Horas Vendidas', 'Disp', 'TP', 'TG']
         for col in cols_numericas:
             if col in df_com.columns: df_com[col] = df_com[col].apply(converter_br_para_float)
             if col in df_aprov.columns: df_aprov[col] = df_aprov[col].apply(converter_br_para_float)
 
-        # Chaves
+        # Merge
         df_com['Key_D'] = df_com['Data'].astype(str)
         df_com['Key_T'] = df_com['Técnico'].astype(str)
         df_aprov['Key_D'] = df_aprov['Data'].astype(str)
         df_aprov['Key_T'] = df_aprov['Técnico'].astype(str)
 
-        # Merge
         df_final = pd.merge(
             df_com, df_aprov, 
             left_on=['Key_D', 'Key_T'], right_on=['Key_D', 'Key_T'], 
             how='outer', suffixes=('_C', '_A')
         )
-        df_final.fillna(0.0, inplace=True) # Zeros NUMÉRICOS
+        df_final.fillna(0.0, inplace=True)
         
-        # Consolidar
+        # Consolidar Chaves
         df_final['Data'] = df_final.apply(lambda x: x['Data_C'] if x['Data_C'] != 0 and str(x['Data_C']) != "0" else x['Data_A'], axis=1)
         df_final['Técnico'] = df_final.apply(lambda x: x['Técnico_C'] if x['Técnico_C'] != 0 and str(x['Técnico_C']) != "0" else x['Técnico_A'], axis=1)
 
         cols_finais = ['Data', 'Técnico', 'Horas Vendidas', 'Disp', 'TP', 'TG']
         df_final = df_final[[c for c in cols_finais if c in df_final.columns]]
 
-        # --- CRUCIAL: NÃO CONVERTER DE VOLTA PARA STRING ---
-        # Removemos o loop que estragava os dados transformando em texto.
-        # Enviamos o float direto.
-        
+        # --- A REGRA DE OURO (SOLICITAÇÃO DO USUÁRIO) ---
+        # Divide todas as colunas numéricas por 100 antes de salvar no Consolidado.
+        # Isso corrige o problema de "8,30 vira 830" (agora 830 vira 8.3).
+        for col in ['Horas Vendidas', 'Disp', 'TP', 'TG']:
+             if col in df_final.columns:
+                 df_final[col] = df_final[col] / 100.0
+
         atualizar_planilha_preservando_formato(sh, "Consolidado", df_final)
         return True
     except Exception as e:
@@ -271,6 +257,9 @@ def executar_rotina_global(df_com=None, df_aprov=None):
     status_msg = st.empty()
     bar = st.progress(0)
     try:
+        # Nota: As abas intermediárias podem continuar salvando "bruto",
+        # pois a correção /100 acontece na Unificação final.
+        
         if df_com is not None and not df_com.empty:
             status_msg.info("💾 Salvando Comissões...")
             salvar_com_upsert("Comissoes", df_com, ["Data Processamento", "Sigla Técnico"])
@@ -281,12 +270,12 @@ def executar_rotina_global(df_com=None, df_aprov=None):
             salvar_com_upsert("Aproveitamento", df_aprov, ["Data", "Técnico"])
             bar.progress(70)
             
-        status_msg.info("🔄 Unificando bases...")
+        status_msg.info("🔄 Unificando bases e aplicando correção (/100)...")
         sucesso = processar_unificacao()
         bar.progress(100)
         
         if sucesso:
-            status_msg.success("✅ Sucesso! Dados Consolidados (Números Puros).")
+            status_msg.success("✅ Sucesso! Dados Consolidados e Corrigidos.")
             st.balloons()
         else:
             status_msg.warning("⚠️ Salvo, mas erro na unificação.")
