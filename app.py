@@ -211,7 +211,7 @@ def salvar_com_upsert(nome_aba, novos_dados_df, colunas_chaves):
     atualizar_planilha_preservando_formato(sh, nome_aba, df_final)
     return len(df_final)
 
-# --- NOVA FUNÇÃO: SALVAR AJUSTE MANUAL ---
+# --- FUNÇÃO: SALVAR AJUSTE MANUAL ---
 def salvar_ajuste_manual(data, tecnico, metrica, valor, motivo):
     client = conectar_sheets()
     sh = client.open_by_key(ID_PLANILHA_MESTRA)
@@ -275,11 +275,12 @@ def aplicar_logica_ajustes(df_base):
         print(f"Erro ajustes: {e}")
         return df_base
 
-# --- NOVA FUNÇÃO: TRADUZIR NOMES (DÁ BRILHO AO BI) ---
+# --- NOVA FUNÇÃO: TRADUZIR NOMES (VERSÃO BLINDADA) ---
 def aplicar_traducao_nomes(df_final):
     """
-    Substitui as siglas (ex: HBN) pelos nomes amigáveis (ex: Hebert B. (HBN))
-    baseado na aba 'Nomes' da planilha.
+    Lê a aba 'Nomes' ignorando cabeçalhos e aplica a tradução.
+    Coluna A = Sigla
+    Coluna B = Nome
     """
     try:
         client = conectar_sheets()
@@ -287,18 +288,27 @@ def aplicar_traducao_nomes(df_final):
         
         try:
             ws_nomes = sh.worksheet("Nomes")
-            dados_nomes = ws_nomes.get_all_records() # Esperado: Sigla, Nome
+            # Pega todas as linhas como lista simples
+            todas_linhas = ws_nomes.get_all_values()
             
-            # Cria dicionário de tradução { 'HBN': 'Hebert B. (HBN)' }
-            dicionario_nomes = {str(row['Sigla']).strip(): str(row['Nome']).strip() for row in dados_nomes}
+            dicionario_nomes = {}
+            # Assume que a linha 1 é cabeçalho, começa da linha 2
+            for row in todas_linhas[1:]: 
+                if len(row) >= 2: # Garante que tem Coluna A e B
+                    sigla = str(row[0]).strip().upper()
+                    nome = str(row[1]).strip()
+                    if sigla and nome:
+                        dicionario_nomes[sigla] = nome
             
             if dicionario_nomes:
                 # Aplica a troca na coluna Técnico
-                # Se a sigla estiver no dicionário, troca. Se não, mantém a sigla.
-                df_final['Técnico'] = df_final['Técnico'].apply(lambda sigla: dicionario_nomes.get(str(sigla).strip(), sigla))
+                df_final['Técnico'] = df_final['Técnico'].apply(
+                    lambda sigla: dicionario_nomes.get(str(sigla).strip().upper(), sigla)
+                )
+                print(f"Tradução aplicada: {len(dicionario_nomes)} nomes encontrados.")
                 
-        except:
-            # Se a aba Nomes não existir ou estiver vazia, segue a vida sem erro
+        except Exception as e:
+            print(f"Aba 'Nomes' não lida: {e}")
             pass
             
         return df_final
@@ -307,7 +317,7 @@ def aplicar_traducao_nomes(df_final):
         print(f"Erro na tradução de nomes: {e}")
         return df_final
 
-# --- UNIFICAÇÃO (ATUALIZADA) ---
+# --- UNIFICAÇÃO (COMPLETA) ---
 def processar_unificacao():
     try:
         client = conectar_sheets()
@@ -368,10 +378,10 @@ def processar_unificacao():
              if col in df_final.columns:
                  df_final[col] = df_final[col] / 100.0
 
-        # 2. APLICAR AJUSTES (Ainda usando a Sigla)
+        # 2. APLICAR AJUSTES (Valores Reais)
         df_final = aplicar_logica_ajustes(df_final)
         
-        # 3. TRADUZIR NOMES (Só agora transformamos HBN em Hebert)
+        # 3. TRADUZIR NOMES (Maquiagem Final para o BI)
         df_final = aplicar_traducao_nomes(df_final)
 
         atualizar_planilha_preservando_formato(sh, "Consolidado", df_final)
@@ -395,12 +405,12 @@ def executar_rotina_global(df_com=None, df_aprov=None):
             salvar_com_upsert("Aproveitamento", df_aprov, ["Data", "Técnico"])
             bar.progress(70)
             
-        status_msg.info("🔄 Unificando bases, Ajustando e Nomeando...")
+        status_msg.info("🔄 Unificando, Ajustando e Traduzindo Nomes...")
         sucesso = processar_unificacao()
         bar.progress(100)
         
         if sucesso:
-            status_msg.success("✅ Sucesso! Dados Consolidados e Atualizados.")
+            status_msg.success("✅ Sucesso! Dados Consolidados e Enviados para o BI.")
             st.balloons()
         else:
             status_msg.warning("⚠️ Salvo, mas erro na unificação.")
