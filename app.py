@@ -335,4 +335,206 @@ def processar_unificacao():
 
         df_final = pd.merge(
             df_com, df_aprov, 
-            left_on=['Key_D', 'Key_T'],
+            left_on=['Key_D', 'Key_T'], right_on=['Key_D', 'Key_T'], 
+            how='outer', suffixes=('_C', '_A')
+        )
+        df_final.fillna(0.0, inplace=True)
+        
+        # Consolidar Chaves
+        df_final['Data'] = df_final.apply(lambda x: x['Data_C'] if x['Data_C'] != 0 and str(x['Data_C']) != "0" else x['Data_A'], axis=1)
+        df_final['Técnico'] = df_final.apply(lambda x: x['Técnico_C'] if x['Técnico_C'] != 0 and str(x['Técnico_C']) != "0" else x['Técnico_A'], axis=1)
+
+        cols_finais = ['Data', 'Técnico', 'Horas Vendidas', 'Disp', 'TP', 'TG']
+        df_final = df_final[[c for c in cols_finais if c in df_final.columns]]
+
+        # --- A REGRA DE OURO (CORREÇÃO DECIMAL) ---
+        for col in ['Horas Vendidas', 'Disp', 'TP', 'TG']:
+             if col in df_final.columns:
+                 df_final[col] = df_final[col] / 100.0
+
+        # --- AQUI ENTRA A MÁGICA DOS AJUSTES ---
+        # Aplicamos os ajustes DEPOIS de dividir por 100, para que o ajuste manual
+        # seja em "valores reais" (ex: +40 horas são somados direto).
+        df_final = aplicar_logica_ajustes(df_final)
+        # ---------------------------------------
+
+        atualizar_planilha_preservando_formato(sh, "Consolidado", df_final)
+        return True
+    except Exception as e:
+        print(f"Erro unificação: {e}")
+        return False
+
+# --- ROTINA MESTRA ---
+def executar_rotina_global(df_com=None, df_aprov=None):
+    status_msg = st.empty()
+    bar = st.progress(0)
+    try:
+        if df_com is not None and not df_com.empty:
+            status_msg.info("💾 Salvando Comissões...")
+            salvar_com_upsert("Comissoes", df_com, ["Data Processamento", "Sigla Técnico"])
+            bar.progress(40)
+        
+        if df_aprov is not None and not df_aprov.empty:
+            status_msg.info("💾 Salvando Aproveitamento...")
+            salvar_com_upsert("Aproveitamento", df_aprov, ["Data", "Técnico"])
+            bar.progress(70)
+            
+        status_msg.info("🔄 Unificando bases e Aplicando Ajustes...")
+        sucesso = processar_unificacao()
+        bar.progress(100)
+        
+        if sucesso:
+            status_msg.success("✅ Sucesso! Dados Consolidados e Ajustados com Sucesso.")
+            st.balloons()
+        else:
+            status_msg.warning("⚠️ Salvo, mas erro na unificação.")
+            
+    except Exception as e: status_msg.error(f"Erro: {e}")
+
+# --- HELPER: LISTAR TÉCNICOS ---
+def listar_tecnicos_unicos():
+    try:
+        client = conectar_sheets()
+        sh = client.open_by_key(ID_PLANILHA_MESTRA)
+        # Tenta pegar da aba Consolidado para ser mais rápido
+        try: vals = sh.worksheet("Consolidado").col_values(2)[1:] # Coluna B (Técnico)
+        except: vals = []
+        # Remove duplicatas e vazios
+        unicos = sorted(list(set([v for v in vals if v])))
+        return unicos
+    except: return []
+
+# --- INTERFACE ---
+st.sidebar.title("Login Seguro")
+senha = st.sidebar.text_input("Senha:", type="password")
+
+if senha == verificar_acesso():
+    st.sidebar.success("Acesso Liberado")
+    st.title("🏭 Central de Processamento WLM")
+    
+    # ADICIONADA ABA 3: AJUSTES
+    aba1, aba2, aba3 = st.tabs(["💰 Comissões", "⚙️ Aproveitamento", "🔧 Ajustes Manuais"])
+    df_comissao_global = None
+    df_aprov_global = None
+
+    with aba1:
+        st.header("Upload Comissões")
+        files_com = st.file_uploader("Arquivos HTML", accept_multiple_files=True, key="up_com")
+        if files_com:
+            dados_c = parse_comissoes(files_com)
+            if dados_c:
+                df_comissao_global = pd.DataFrame(dados_c, columns=["Data Processamento", "Nome do Arquivo", "Sigla Técnico", "Horas Vendidas"])
+                st.dataframe(df_comissao_global, height=200)
+
+    with aba2:
+        st.header("Upload Aproveitamento")
+        files_aprov = st.file_uploader("Arquivos HTML/SLK", accept_multiple_files=True, key="up_aprov")
+        if files_aprov:
+            dados_a = parse_aproveitamento(files_aprov)
+            if dados_a:
+                df_aprov_global = pd.DataFrame(dados_a, columns=["Data", "Arquivo", "Técnico", "Disp", "TP", "TG"])
+                st.dataframe(df_aprov_global, height=200)
+
+    with aba3:
+        st.header("Correção e Ajustes")
+        st.info("Use esta tela para corrigir dias fechados errados ou transferir horas.")
+        
+        with st.form("form_ajustes"):
+            col_a, col_b = st.columns(2)
+            data_adj = col_a.date_input("Data do Ajuste")
+            
+            # Carrega lista para facilitar
+            lista_tec = listar_tecnicos_unicos()
+            if not lista_tec: lista_tec = ["Digite Manualmente Abaixo"]
+            
+            tec_adj = col_b.selectbox("Selecione o Técnico", lista_tec)
+            # Campo livre caso o técnico não esteja na lista ainda
+            tec_manual = st.text_input("Ou digite a Sigla do Técnico (se não estiver na lista acima)")
+            
+            col_c, col_d = st.columns(2)
+            metrica_adj = col_c.selectbox("Métrica", [
+                "Horas Vendidas (HV)", 
+                "Tempo Padrão (TP)", 
+                "Tempo Disponível (Disp)", 
+                "Tempo Garantia (TG)"
+            ])
+            valor_adj = col_d.number_input("Valor a Somar/Subtrair (Use negativo para remover)", step=0.5, format="%.2f")
+            
+            motivo_adj = st.text_input("Motivo da Correção")
+            
+            if st.form_submit_button("💾 Salvar Ajuste e Atualizar BI"):
+                tecnico_final = tec_manual.upper().strip() if tec_manual else tec_adj
+                
+                if tecnico_final:
+                    # 1. Salva na aba Ajustes
+                    salvar_ajuste_manual(data_adj, tecnico_final, metrica_adj, valor_adj, motivo_adj)
+                    st.success(f"Ajuste salvo para {tecnico_final}!")
+                    
+                    # 2. Força o reprocessamento para atualizar o Consolidado IMEDIATAMENTE
+                    with st.spinner("Atualizando aba Consolidado com o novo ajuste..."):
+                        sucesso = processar_unificacao()
+                        if sucesso: st.success("BI Atualizado com sucesso!")
+                else:
+                    st.error("Selecione ou digite um técnico.")
+                    
+        # Histórico de Ajustes Recentes
+        st.markdown("### Últimos Ajustes Realizados")
+        try:
+            client = conectar_sheets()
+            sh = client.open_by_key(ID_PLANILHA_MESTRA)
+            # Tenta ler aba Ajustes. Se não existir, não mostra nada
+            try: 
+                df_ajustes_view = pd.DataFrame(sh.worksheet("Ajustes").get_all_records())
+                if not df_ajustes_view.empty:
+                    st.dataframe(df_ajustes_view.tail(5))
+            except: st.write("Nenhum ajuste registrado.")
+        except: pass
+
+    st.divider()
+    col_btn, col_txt = st.columns([1, 4])
+    with col_btn:
+        # Botão principal mantido
+        if st.button("🚀 GRAVAR TUDO E ATUALIZAR", type="primary"):
+            if df_comissao_global is None and df_aprov_global is None: st.warning("Sem arquivos.")
+            else: executar_rotina_global(df_comissao_global, df_aprov_global)
+
+    # --- VISUALIZAÇÃO CORRIGIDA ---
+    st.divider()
+    st.header("📊 Painel de Resultados (Consolidado)")
+    
+    if st.checkbox("Carregar Visualização da Planilha Mestra", value=True):
+        try:
+            client_viz = conectar_sheets()
+            sh_viz = client_viz.open_by_key(ID_PLANILHA_MESTRA)
+            ws_cons = sh_viz.worksheet("Consolidado")
+            dados_cons = ws_cons.get_all_records()
+
+            if dados_cons:
+                df_viz = pd.DataFrame(dados_cons)
+                
+                if 'Data' in df_viz.columns and 'Técnico' in df_viz.columns:
+                    df_viz['Data'] = pd.to_datetime(df_viz['Data'], dayfirst=True, errors='coerce')
+                    val_col = 'TP' if 'TP' in df_viz.columns else df_viz.columns[2]
+                    
+                    df_pivot = df_viz.pivot_table(
+                        index='Técnico', 
+                        columns='Data', 
+                        values=val_col, 
+                        aggfunc='sum', 
+                        fill_value=0
+                    )
+                    
+                    df_pivot = df_pivot.sort_index(axis=1)
+                    df_pivot.columns = df_pivot.columns.strftime('%d/%m')
+                    
+                    st.write(f"Visualizando: **{val_col}** (Já considerando Ajustes)")
+                    st.dataframe(df_pivot, use_container_width=True)
+                else:
+                    st.warning("Colunas 'Data' e 'Técnico' necessárias para visualização.")
+            else:
+                st.info("Planilha 'Consolidado' está vazia.")
+        except Exception as e:
+            st.error(f"Erro ao carregar visualização: {e}")
+
+else:
+    if senha: st.error("Senha incorreta.")
