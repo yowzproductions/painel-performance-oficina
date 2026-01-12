@@ -231,11 +231,8 @@ def salvar_ajuste_manual(data, tecnico, metrica, valor, motivo):
         datetime.now().strftime('%d/%m/%Y %H:%M:%S')
     ])
 
-# --- NOVA FUNÇÃO: APLICAR LÓGICA DE AJUSTES ---
+# --- FUNÇÃO: APLICAR LÓGICA DE AJUSTES ---
 def aplicar_logica_ajustes(df_base):
-    """
-    Lê a aba 'Ajustes' e aplica matematicamente ao DataFrame antes de salvar no Consolidado.
-    """
     try:
         client = conectar_sheets()
         sh = client.open_by_key(ID_PLANILHA_MESTRA)
@@ -247,7 +244,6 @@ def aplicar_logica_ajustes(df_base):
 
         df_ajustes = pd.DataFrame(dados_ajustes)
         
-        # Mapeamento de métricas (Nome no Dropdown -> Nome na Coluna do DF)
         mapa = {
             "Horas Vendidas (HV)": "Horas Vendidas",
             "Tempo Padrão (TP)": "TP",
@@ -255,39 +251,63 @@ def aplicar_logica_ajustes(df_base):
             "Tempo Garantia (TG)": "TG"
         }
 
-        # Garante datas comparáveis
         df_base['Key_D_Comp'] = pd.to_datetime(df_base['Data'], dayfirst=True, errors='coerce')
         
         for _, row in df_ajustes.iterrows():
             try:
-                # Dados do Ajuste
                 dt_ajuste = pd.to_datetime(row['Data'], dayfirst=True, errors='coerce')
                 tec_ajuste = str(row['Técnico']).strip()
                 metrica_ajuste = mapa.get(row['Métrica'])
                 valor_ajuste = float(str(row['Valor']).replace(',', '.'))
 
                 if metrica_ajuste and metrica_ajuste in df_base.columns:
-                    # Filtra a linha correta no DataFrame Base
                     mask = (df_base['Key_D_Comp'] == dt_ajuste) & (df_base['Técnico'] == tec_ajuste)
-                    
                     if mask.any():
-                        # Aplica a soma/subtração
                         df_base.loc[mask, metrica_ajuste] += valor_ajuste
-            except Exception as e:
-                print(f"Erro ao processar linha de ajuste: {e}")
-                continue
+            except: continue
         
-        # Remove coluna auxiliar
         if 'Key_D_Comp' in df_base.columns:
             df_base.drop(columns=['Key_D_Comp'], inplace=True)
             
         return df_base
 
     except Exception as e:
-        print(f"Erro geral ao ler ajustes: {e}")
-        return df_base # Retorna o original se der erro nos ajustes
+        print(f"Erro ajustes: {e}")
+        return df_base
 
-# --- UNIFICAÇÃO (ATUALIZADA COM AJUSTES) ---
+# --- NOVA FUNÇÃO: TRADUZIR NOMES (DÁ BRILHO AO BI) ---
+def aplicar_traducao_nomes(df_final):
+    """
+    Substitui as siglas (ex: HBN) pelos nomes amigáveis (ex: Hebert B. (HBN))
+    baseado na aba 'Nomes' da planilha.
+    """
+    try:
+        client = conectar_sheets()
+        sh = client.open_by_key(ID_PLANILHA_MESTRA)
+        
+        try:
+            ws_nomes = sh.worksheet("Nomes")
+            dados_nomes = ws_nomes.get_all_records() # Esperado: Sigla, Nome
+            
+            # Cria dicionário de tradução { 'HBN': 'Hebert B. (HBN)' }
+            dicionario_nomes = {str(row['Sigla']).strip(): str(row['Nome']).strip() for row in dados_nomes}
+            
+            if dicionario_nomes:
+                # Aplica a troca na coluna Técnico
+                # Se a sigla estiver no dicionário, troca. Se não, mantém a sigla.
+                df_final['Técnico'] = df_final['Técnico'].apply(lambda sigla: dicionario_nomes.get(str(sigla).strip(), sigla))
+                
+        except:
+            # Se a aba Nomes não existir ou estiver vazia, segue a vida sem erro
+            pass
+            
+        return df_final
+        
+    except Exception as e:
+        print(f"Erro na tradução de nomes: {e}")
+        return df_final
+
+# --- UNIFICAÇÃO (ATUALIZADA) ---
 def processar_unificacao():
     try:
         client = conectar_sheets()
@@ -314,20 +334,17 @@ def processar_unificacao():
         cols_aprov = ['Data', 'Técnico', 'Disp', 'TP', 'TG']
         df_aprov = df_aprov[[c for c in cols_aprov if c in df_aprov.columns]]
 
-        # Padronização de Data
         if 'Data' in df_com.columns:
             df_com['Data'] = df_com['Data'].apply(padronizar_data_quatro_digitos)
         
         if 'Data' in df_aprov.columns:
             df_aprov['Data'] = df_aprov['Data'].apply(padronizar_data_quatro_digitos)
 
-        # Conversão Numérica Inicial
         cols_numericas = ['Horas Vendidas', 'Disp', 'TP', 'TG']
         for col in cols_numericas:
             if col in df_com.columns: df_com[col] = df_com[col].apply(converter_br_para_float)
             if col in df_aprov.columns: df_aprov[col] = df_aprov[col].apply(converter_br_para_float)
 
-        # Merge
         df_com['Key_D'] = df_com['Data'].astype(str)
         df_com['Key_T'] = df_com['Técnico'].astype(str)
         df_aprov['Key_D'] = df_aprov['Data'].astype(str)
@@ -340,22 +357,22 @@ def processar_unificacao():
         )
         df_final.fillna(0.0, inplace=True)
         
-        # Consolidar Chaves
         df_final['Data'] = df_final.apply(lambda x: x['Data_C'] if x['Data_C'] != 0 and str(x['Data_C']) != "0" else x['Data_A'], axis=1)
         df_final['Técnico'] = df_final.apply(lambda x: x['Técnico_C'] if x['Técnico_C'] != 0 and str(x['Técnico_C']) != "0" else x['Técnico_A'], axis=1)
 
         cols_finais = ['Data', 'Técnico', 'Horas Vendidas', 'Disp', 'TP', 'TG']
         df_final = df_final[[c for c in cols_finais if c in df_final.columns]]
 
-        # --- A REGRA DE OURO (CORREÇÃO DECIMAL) ---
+        # 1. DIVIDIR POR 100
         for col in ['Horas Vendidas', 'Disp', 'TP', 'TG']:
              if col in df_final.columns:
                  df_final[col] = df_final[col] / 100.0
 
-        # --- AQUI ENTRA A MÁGICA DOS AJUSTES ---
-        # Aplicamos os ajustes DEPOIS de dividir por 100
+        # 2. APLICAR AJUSTES (Ainda usando a Sigla)
         df_final = aplicar_logica_ajustes(df_final)
-        # ---------------------------------------
+        
+        # 3. TRADUZIR NOMES (Só agora transformamos HBN em Hebert)
+        df_final = aplicar_traducao_nomes(df_final)
 
         atualizar_planilha_preservando_formato(sh, "Consolidado", df_final)
         return True
@@ -378,12 +395,12 @@ def executar_rotina_global(df_com=None, df_aprov=None):
             salvar_com_upsert("Aproveitamento", df_aprov, ["Data", "Técnico"])
             bar.progress(70)
             
-        status_msg.info("🔄 Unificando bases e Aplicando Ajustes...")
+        status_msg.info("🔄 Unificando bases, Ajustando e Nomeando...")
         sucesso = processar_unificacao()
         bar.progress(100)
         
         if sucesso:
-            status_msg.success("✅ Sucesso! Dados Consolidados e Ajustados com Sucesso.")
+            status_msg.success("✅ Sucesso! Dados Consolidados e Atualizados.")
             st.balloons()
         else:
             status_msg.warning("⚠️ Salvo, mas erro na unificação.")
@@ -395,10 +412,8 @@ def listar_tecnicos_unicos():
     try:
         client = conectar_sheets()
         sh = client.open_by_key(ID_PLANILHA_MESTRA)
-        # Tenta pegar da aba Consolidado para ser mais rápido
-        try: vals = sh.worksheet("Consolidado").col_values(2)[1:] # Coluna B (Técnico)
+        try: vals = sh.worksheet("Consolidado").col_values(2)[1:] 
         except: vals = []
-        # Remove duplicatas e vazios
         unicos = sorted(list(set([v for v in vals if v])))
         return unicos
     except: return []
@@ -411,7 +426,6 @@ if senha == verificar_acesso():
     st.sidebar.success("Acesso Liberado")
     st.title("🏭 Central de Processamento WLM")
     
-    # ADICIONADA ABA 3: AJUSTES
     aba1, aba2, aba3 = st.tabs(["💰 Comissões", "⚙️ Aproveitamento", "🔧 Ajustes Manuais"])
     df_comissao_global = None
     df_aprov_global = None
@@ -441,13 +455,10 @@ if senha == verificar_acesso():
         with st.form("form_ajustes"):
             col_a, col_b = st.columns(2)
             data_adj = col_a.date_input("Data do Ajuste")
-            
-            # Carrega lista para facilitar
             lista_tec = listar_tecnicos_unicos()
             if not lista_tec: lista_tec = ["Digite Manualmente Abaixo"]
             
             tec_adj = col_b.selectbox("Selecione o Técnico", lista_tec)
-            # Campo livre caso o técnico não esteja na lista ainda
             tec_manual = st.text_input("Ou digite a Sigla do Técnico (se não estiver na lista acima)")
             
             col_c, col_d = st.columns(2)
@@ -457,42 +468,34 @@ if senha == verificar_acesso():
                 "Tempo Disponível (Disp)", 
                 "Tempo Garantia (TG)"
             ])
-            valor_adj = col_d.number_input("Valor a Somar/Subtrair (Use negativo para remover)", step=0.5, format="%.2f")
+            valor_adj = col_d.number_input("Valor (+/-)", step=0.5, format="%.2f")
             
             motivo_adj = st.text_input("Motivo da Correção")
             
             if st.form_submit_button("💾 Salvar Ajuste e Atualizar BI"):
                 tecnico_final = tec_manual.upper().strip() if tec_manual else tec_adj
-                
                 if tecnico_final:
-                    # 1. Salva na aba Ajustes
                     salvar_ajuste_manual(data_adj, tecnico_final, metrica_adj, valor_adj, motivo_adj)
                     st.success(f"Ajuste salvo para {tecnico_final}!")
-                    
-                    # 2. Força o reprocessamento para atualizar o Consolidado IMEDIATAMENTE
-                    with st.spinner("Atualizando aba Consolidado com o novo ajuste..."):
+                    with st.spinner("Atualizando BI..."):
                         sucesso = processar_unificacao()
-                        if sucesso: st.success("BI Atualizado com sucesso!")
+                        if sucesso: st.success("BI Atualizado!")
                 else:
-                    st.error("Selecione ou digite um técnico.")
+                    st.error("Selecione um técnico.")
                     
-        # Histórico de Ajustes Recentes
-        st.markdown("### Últimos Ajustes Realizados")
+        st.markdown("### Últimos Ajustes")
         try:
             client = conectar_sheets()
             sh = client.open_by_key(ID_PLANILHA_MESTRA)
-            # Tenta ler aba Ajustes. Se não existir, não mostra nada
             try: 
                 df_ajustes_view = pd.DataFrame(sh.worksheet("Ajustes").get_all_records())
-                if not df_ajustes_view.empty:
-                    st.dataframe(df_ajustes_view.tail(5))
-            except: st.write("Nenhum ajuste registrado.")
+                if not df_ajustes_view.empty: st.dataframe(df_ajustes_view.tail(5))
+            except: st.write("Nenhum ajuste.")
         except: pass
 
     st.divider()
     col_btn, col_txt = st.columns([1, 4])
     with col_btn:
-        # Botão principal mantido
         if st.button("🚀 GRAVAR TUDO E ATUALIZAR", type="primary"):
             if df_comissao_global is None and df_aprov_global is None: st.warning("Sem arquivos.")
             else: executar_rotina_global(df_comissao_global, df_aprov_global)
