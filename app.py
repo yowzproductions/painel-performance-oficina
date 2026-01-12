@@ -353,8 +353,7 @@ def processar_unificacao():
                  df_final[col] = df_final[col] / 100.0
 
         # --- AQUI ENTRA A MÁGICA DOS AJUSTES ---
-        # Aplicamos os ajustes DEPOIS de dividir por 100, para que o ajuste manual
-        # seja em "valores reais" (ex: +40 horas são somados direto).
+        # Aplicamos os ajustes DEPOIS de dividir por 100
         df_final = aplicar_logica_ajustes(df_final)
         # ---------------------------------------
 
@@ -497,44 +496,6 @@ if senha == verificar_acesso():
         if st.button("🚀 GRAVAR TUDO E ATUALIZAR", type="primary"):
             if df_comissao_global is None and df_aprov_global is None: st.warning("Sem arquivos.")
             else: executar_rotina_global(df_comissao_global, df_aprov_global)
-
-    # --- VISUALIZAÇÃO CORRIGIDA ---
-    st.divider()
-    st.header("📊 Painel de Resultados (Consolidado)")
-    
-    if st.checkbox("Carregar Visualização da Planilha Mestra", value=True):
-        try:
-            client_viz = conectar_sheets()
-            sh_viz = client_viz.open_by_key(ID_PLANILHA_MESTRA)
-            ws_cons = sh_viz.worksheet("Consolidado")
-            dados_cons = ws_cons.get_all_records()
-
-            if dados_cons:
-                df_viz = pd.DataFrame(dados_cons)
-                
-                if 'Data' in df_viz.columns and 'Técnico' in df_viz.columns:
-                    df_viz['Data'] = pd.to_datetime(df_viz['Data'], dayfirst=True, errors='coerce')
-                    val_col = 'TP' if 'TP' in df_viz.columns else df_viz.columns[2]
-                    
-                    df_pivot = df_viz.pivot_table(
-                        index='Técnico', 
-                        columns='Data', 
-                        values=val_col, 
-                        aggfunc='sum', 
-                        fill_value=0
-                    )
-                    
-                    df_pivot = df_pivot.sort_index(axis=1)
-                    df_pivot.columns = df_pivot.columns.strftime('%d/%m')
-                    
-                    st.write(f"Visualizando: **{val_col}** (Já considerando Ajustes)")
-                    st.dataframe(df_pivot, use_container_width=True)
-                else:
-                    st.warning("Colunas 'Data' e 'Técnico' necessárias para visualização.")
-            else:
-                st.info("Planilha 'Consolidado' está vazia.")
-        except Exception as e:
-            st.error(f"Erro ao carregar visualização: {e}")
 
 else:
     if senha: st.error("Senha incorreta.")
