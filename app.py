@@ -53,7 +53,6 @@ def converter_br_para_float(valor):
 
 def padronizar_data_quatro_digitos(data_str):
     """
-    NOVA FUNÇÃO CRÍTICA:
     Transforma '08/12/25' em '08/12/2025'.
     Garante que as chaves de data sejam idênticas para o merge.
     """
@@ -72,7 +71,7 @@ def padronizar_data_quatro_digitos(data_str):
             if len(ano) == 2:
                 ano = '20' + ano
             
-            # Reconstrói a data padronizada com zeros à esquerda se precisar (ex: 8 vira 08)
+            # Reconstrói a data padronizada com zeros à esquerda se precisar
             return f"{dia.zfill(2)}/{mes.zfill(2)}/{ano}"
             
     return data_str
@@ -212,7 +211,83 @@ def salvar_com_upsert(nome_aba, novos_dados_df, colunas_chaves):
     atualizar_planilha_preservando_formato(sh, nome_aba, df_final)
     return len(df_final)
 
-# --- UNIFICAÇÃO (COM PADRONIZAÇÃO DE DATA + CORREÇÃO /100) ---
+# --- NOVA FUNÇÃO: SALVAR AJUSTE MANUAL ---
+def salvar_ajuste_manual(data, tecnico, metrica, valor, motivo):
+    client = conectar_sheets()
+    sh = client.open_by_key(ID_PLANILHA_MESTRA)
+    try:
+        ws = sh.worksheet("Ajustes")
+    except:
+        ws = sh.add_worksheet(title="Ajustes", rows=1000, cols=10)
+        ws.append_row(["Data", "Técnico", "Métrica", "Valor", "Motivo", "Data do Registro"])
+    
+    # Salva o novo ajuste
+    ws.append_row([
+        str(data.strftime('%d/%m/%Y')), 
+        tecnico, 
+        metrica, 
+        float(valor), 
+        motivo, 
+        datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+    ])
+
+# --- NOVA FUNÇÃO: APLICAR LÓGICA DE AJUSTES ---
+def aplicar_logica_ajustes(df_base):
+    """
+    Lê a aba 'Ajustes' e aplica matematicamente ao DataFrame antes de salvar no Consolidado.
+    """
+    try:
+        client = conectar_sheets()
+        sh = client.open_by_key(ID_PLANILHA_MESTRA)
+        ws_ajustes = sh.worksheet("Ajustes")
+        dados_ajustes = ws_ajustes.get_all_records()
+        
+        if not dados_ajustes:
+            return df_base
+
+        df_ajustes = pd.DataFrame(dados_ajustes)
+        
+        # Mapeamento de métricas (Nome no Dropdown -> Nome na Coluna do DF)
+        mapa = {
+            "Horas Vendidas (HV)": "Horas Vendidas",
+            "Tempo Padrão (TP)": "TP",
+            "Tempo Disponível (Disp)": "Disp",
+            "Tempo Garantia (TG)": "TG"
+        }
+
+        # Garante datas comparáveis
+        df_base['Key_D_Comp'] = pd.to_datetime(df_base['Data'], dayfirst=True, errors='coerce')
+        
+        for _, row in df_ajustes.iterrows():
+            try:
+                # Dados do Ajuste
+                dt_ajuste = pd.to_datetime(row['Data'], dayfirst=True, errors='coerce')
+                tec_ajuste = str(row['Técnico']).strip()
+                metrica_ajuste = mapa.get(row['Métrica'])
+                valor_ajuste = float(str(row['Valor']).replace(',', '.'))
+
+                if metrica_ajuste and metrica_ajuste in df_base.columns:
+                    # Filtra a linha correta no DataFrame Base
+                    mask = (df_base['Key_D_Comp'] == dt_ajuste) & (df_base['Técnico'] == tec_ajuste)
+                    
+                    if mask.any():
+                        # Aplica a soma/subtração
+                        df_base.loc[mask, metrica_ajuste] += valor_ajuste
+            except Exception as e:
+                print(f"Erro ao processar linha de ajuste: {e}")
+                continue
+        
+        # Remove coluna auxiliar
+        if 'Key_D_Comp' in df_base.columns:
+            df_base.drop(columns=['Key_D_Comp'], inplace=True)
+            
+        return df_base
+
+    except Exception as e:
+        print(f"Erro geral ao ler ajustes: {e}")
+        return df_base # Retorna o original se der erro nos ajustes
+
+# --- UNIFICAÇÃO (ATUALIZADA COM AJUSTES) ---
 def processar_unificacao():
     try:
         client = conectar_sheets()
@@ -239,8 +314,7 @@ def processar_unificacao():
         cols_aprov = ['Data', 'Técnico', 'Disp', 'TP', 'TG']
         df_aprov = df_aprov[[c for c in cols_aprov if c in df_aprov.columns]]
 
-        # --- APLICA A CORREÇÃO DE DATA AQUI ---
-        # Antes de fazer o Merge, garantimos que "25" vira "2025"
+        # Padronização de Data
         if 'Data' in df_com.columns:
             df_com['Data'] = df_com['Data'].apply(padronizar_data_quatro_digitos)
         
@@ -261,143 +335,4 @@ def processar_unificacao():
 
         df_final = pd.merge(
             df_com, df_aprov, 
-            left_on=['Key_D', 'Key_T'], right_on=['Key_D', 'Key_T'], 
-            how='outer', suffixes=('_C', '_A')
-        )
-        df_final.fillna(0.0, inplace=True)
-        
-        # Consolidar Chaves (Data e Técnico)
-        df_final['Data'] = df_final.apply(lambda x: x['Data_C'] if x['Data_C'] != 0 and str(x['Data_C']) != "0" else x['Data_A'], axis=1)
-        df_final['Técnico'] = df_final.apply(lambda x: x['Técnico_C'] if x['Técnico_C'] != 0 and str(x['Técnico_C']) != "0" else x['Técnico_A'], axis=1)
-
-        cols_finais = ['Data', 'Técnico', 'Horas Vendidas', 'Disp', 'TP', 'TG']
-        df_final = df_final[[c for c in cols_finais if c in df_final.columns]]
-
-        # --- A REGRA DE OURO (CORREÇÃO DECIMAL) ---
-        # Divide todas as colunas numéricas por 100 antes de salvar no Consolidado.
-        for col in ['Horas Vendidas', 'Disp', 'TP', 'TG']:
-             if col in df_final.columns:
-                 df_final[col] = df_final[col] / 100.0
-
-        atualizar_planilha_preservando_formato(sh, "Consolidado", df_final)
-        return True
-    except Exception as e:
-        print(f"Erro unificação: {e}")
-        return False
-
-# --- ROTINA MESTRA ---
-def executar_rotina_global(df_com=None, df_aprov=None):
-    status_msg = st.empty()
-    bar = st.progress(0)
-    try:
-        if df_com is not None and not df_com.empty:
-            status_msg.info("💾 Salvando Comissões...")
-            salvar_com_upsert("Comissoes", df_com, ["Data Processamento", "Sigla Técnico"])
-            bar.progress(40)
-        
-        if df_aprov is not None and not df_aprov.empty:
-            status_msg.info("💾 Salvando Aproveitamento...")
-            salvar_com_upsert("Aproveitamento", df_aprov, ["Data", "Técnico"])
-            bar.progress(70)
-            
-        status_msg.info("🔄 Unificando bases e Padronizando Datas...")
-        sucesso = processar_unificacao()
-        bar.progress(100)
-        
-        if sucesso:
-            status_msg.success("✅ Sucesso! Dados Consolidados, Datas Alinhadas e Valores Corrigidos.")
-            st.balloons()
-        else:
-            status_msg.warning("⚠️ Salvo, mas erro na unificação.")
-            
-    except Exception as e: status_msg.error(f"Erro: {e}")
-
-# --- INTERFACE ---
-st.sidebar.title("Login Seguro")
-senha = st.sidebar.text_input("Senha:", type="password")
-
-if senha == verificar_acesso():
-    st.sidebar.success("Acesso Liberado")
-    st.title("🏭 Central de Processamento WLM")
-    
-    aba1, aba2 = st.tabs(["💰 Comissões", "⚙️ Aproveitamento"])
-    df_comissao_global = None
-    df_aprov_global = None
-
-    with aba1:
-        st.header("Upload Comissões")
-        files_com = st.file_uploader("Arquivos HTML", accept_multiple_files=True, key="up_com")
-        if files_com:
-            dados_c = parse_comissoes(files_com)
-            if dados_c:
-                df_comissao_global = pd.DataFrame(dados_c, columns=["Data Processamento", "Nome do Arquivo", "Sigla Técnico", "Horas Vendidas"])
-                st.dataframe(df_comissao_global, height=200)
-
-    with aba2:
-        st.header("Upload Aproveitamento")
-        files_aprov = st.file_uploader("Arquivos HTML/SLK", accept_multiple_files=True, key="up_aprov")
-        if files_aprov:
-            dados_a = parse_aproveitamento(files_aprov)
-            if dados_a:
-                df_aprov_global = pd.DataFrame(dados_a, columns=["Data", "Arquivo", "Técnico", "Disp", "TP", "TG"])
-                st.dataframe(df_aprov_global, height=200)
-
-    st.divider()
-    col_btn, col_txt = st.columns([1, 4])
-    with col_btn:
-        if st.button("🚀 GRAVAR TUDO E ATUALIZAR", type="primary"):
-            if df_comissao_global is None and df_aprov_global is None: st.warning("Sem arquivos.")
-            else: executar_rotina_global(df_comissao_global, df_aprov_global)
-
-    # --- NOVO BLOCO: VISUALIZAÇÃO CORRIGIDA ---
-    st.divider()
-    st.header("📊 Painel de Resultados (Consolidado)")
-    
-    # Checkbox para carregar apenas quando necessário (economiza tempo)
-    if st.checkbox("Carregar Visualização da Planilha Mestra", value=True):
-        try:
-            client_viz = conectar_sheets()
-            sh_viz = client_viz.open_by_key(ID_PLANILHA_MESTRA)
-            ws_cons = sh_viz.worksheet("Consolidado")
-            dados_cons = ws_cons.get_all_records()
-
-            if dados_cons:
-                df_viz = pd.DataFrame(dados_cons)
-                
-                # VERIFICAÇÃO E CORREÇÃO DE EXIBIÇÃO
-                if 'Data' in df_viz.columns and 'Técnico' in df_viz.columns:
-                    
-                    # 1. Converter Data Texto para Data Real (Ordenação)
-                    # dayfirst=True é vital para ler 10/12 como 10 de Dezembro
-                    df_viz['Data'] = pd.to_datetime(df_viz['Data'], dayfirst=True, errors='coerce')
-                    
-                    # 2. Criar a Pivot Table (Tabela Dinâmica)
-                    # Ajuste 'TP' para 'Horas Vendidas' ou 'TG' se quiser ver outro dado
-                    val_col = 'TP' if 'TP' in df_viz.columns else df_viz.columns[2]
-                    
-                    df_pivot = df_viz.pivot_table(
-                        index='Técnico', 
-                        columns='Data', 
-                        values=val_col, 
-                        aggfunc='sum', 
-                        fill_value=0
-                    )
-                    
-                    # 3. Ordenar Cronologicamente as Colunas (Datas)
-                    df_pivot = df_pivot.sort_index(axis=1)
-                    
-                    # 4. Formatar Cabeçalho para "dd/mm" (Resolve colunas largas)
-                    df_pivot.columns = df_pivot.columns.strftime('%d/%m')
-                    
-                    # 5. Exibir limpo (Sem cores, sem st.style)
-                    st.write(f"Visualizando: **{val_col}**")
-                    st.dataframe(df_pivot, use_container_width=True)
-                else:
-                    st.warning("Colunas 'Data' e 'Técnico' necessárias para visualização.")
-            else:
-                st.info("Planilha 'Consolidado' está vazia.")
-        except Exception as e:
-            st.error(f"Erro ao carregar visualização: {e}")
-
-else:
-    if senha: st.error("Senha incorreta.")
+            left_on=['Key_D', 'Key_T'],
